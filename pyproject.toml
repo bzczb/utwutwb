@@ -10,7 +10,8 @@ requires-python = ">=3.12"
 dependencies = [
     "attrs",
     "BTrees",
-    "cykhash"
+    "cykhash",
+    "sqlglot"
 ]
 
 [tool.poetry.group.dev.dependencies]

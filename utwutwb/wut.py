@@ -1,4 +1,3 @@
-import ctypes
 import struct
 import typing as T
 from functools import partial
@@ -7,61 +6,24 @@ import attr
 from BTrees.Interfaces import IBTree
 from BTrees.LLBTree import LLBTree
 from BTrees.LOBTree import LOBTree
-from BTrees.OOBTree import OOBTree
-from BTrees.QOBTree import QOBTree
 from cykhash import Int64Set
 
+import utwutwb.id_ops as ido
 import utwutwb.set_ops as so
+from utwutwb.context import Context
+from utwutwb.index import HashIndex, Index, IndexParams
 
 ADDRESS_SIZE = struct.calcsize('P')
 assert ADDRESS_SIZE == 8, '64-bit address size required'
-
-IndexBTrees = {'obj': OOBTree, 'int': LOBTree, 'uint': QOBTree}
 
 
 _T = T.TypeVar('_T')
 
 
 @attr.s(slots=True)
-class WutIndex:
-    name: str = attr.ib()
-    key: str | T.Callable = attr.ib(default=None)
-    mode: T.Literal['attr', 'dict', 'callable'] = attr.ib(default=None)
-    key_type: T.Literal['obj', 'int', 'uint'] = attr.ib(default='obj')
-
-    def __attrs_post_init__(self):
-        if self.key is None:
-            self.key = self.name
-        if self.mode is None:
-            if isinstance(self.key, str):
-                self.mode = 'attr'
-            elif callable(self.key):
-                self.mode = 'callable'
-            else:
-                raise ValueError('mode must be specified for non-str key')
-
-    def get_from_obj(self, obj):
-        if self.mode == 'attr':
-            return getattr(obj, self.key)
-        elif self.mode == 'dict':
-            return obj[self.key]
-        elif self.mode == 'callable':
-            return self.key(obj)
-
-
-@attr.s(slots=True)
 class IndexStorage:
     tree: IBTree = attr.ib()
     none_set: Int64Set = attr.ib()
-
-
-@attr.s(slots=True)
-class IndexMemory:
-    values: tuple = attr.ib()
-    tacs: tuple = attr.ib()
-
-    def __iter__(self):
-        return iter((self.values, self.tacs))
 
 
 class WutSortKey:
@@ -74,7 +36,7 @@ class WutSortKey:
         rowid_desc: bool,
         id_: int,
     ):
-        self.mem = wut._get_index_memory(id_).values
+        self.mem = wut.index_memory[id_]
         self.ordering = ordering
         self.rowid_desc = rowid_desc
         self.id_ = id_
@@ -90,8 +52,11 @@ class WutSortKey:
         return (self.rowid < other.rowid) != descending
 
 
+ComputedAttrs = dict[str, T.Callable[[_T], T.Any]]
+
+
 @attr.s(slots=True, kw_only=True, init=False)
-class Wut(T.Generic[_T]):
+class Wut(Context[_T]):
     all_items: IBTree = attr.ib()
     """
     map of item id to item
@@ -100,10 +65,6 @@ class Wut(T.Generic[_T]):
     """
     index_memory: IBTree = attr.ib()
     """map of item id to remembered index values"""
-    index_storage: dict[str, IndexStorage] = attr.ib()
-    """map of index name to index storage"""
-    tacs_to_items: IBTree = attr.ib()
-    """map of tags and categories to items"""
     items_to_rowid: IBTree = attr.ib()
     """map of item id to row id"""
     rowid_to_items: IBTree = attr.ib()
@@ -119,113 +80,100 @@ class Wut(T.Generic[_T]):
     important for reproducibility
     """
 
-    indices: dict[str, WutIndex] = attr.ib()
-    """list of indices"""
+    attrs: ComputedAttrs = attr.ib()
+    indexes: dict[str, list[Index]] = attr.ib()
+    index_nums: dict[str, int] = attr.ib()
 
-    _mutable_objects: bool = attr.ib()
-    """whether objects can change from under us"""
     _default_obj: T.Any = attr.ib(default=None)
-
-    @staticmethod
-    def id_from_obj(obj):
-        # return int(np.uint64(id(obj)).astype(np.int64))
-        return id(obj)
-
-    @staticmethod
-    def obj_from_id(id_):
-        return ctypes.cast(id_, ctypes.py_object).value
 
     def __init__(
         self,
-        indices: T.Sequence[WutIndex | str],
+        attrs: ComputedAttrs = None,
+        indexes: T.Sequence[IndexParams | str] = None,
         objects: T.Iterable[_T] = None,
-        *,
-        mutable_objects=True,
     ):
-        self._mutable_objects = mutable_objects
+        self.attrs = attrs or {}
+        indexes = indexes or []
 
         self.all_items = LOBTree()
-        if self._mutable_objects:
-            self.index_memory = LOBTree()
-        self.index_storage = dict()
+        self.index_memory = LOBTree()
         self.tacs_to_items = LOBTree()
         self.items_to_rowid = LLBTree()
         self.rowid_to_items = LLBTree()
         self.count = 0
         self._rowid_counter = 0
 
-        assert len(indices) > 0, 'at least one index is required'
-        indices_c = [
-            index if isinstance(index, WutIndex) else WutIndex(index)
-            for index in indices
+        assert len(indexes) > 0, 'at least one index is required'
+        index_params = [
+            ip if isinstance(ip, IndexParams) else IndexParams(ip) for ip in indexes
         ]
-        index_names = {index.name for index in indices_c}
-        if len(index_names) != len(indices_c):
+        index_names = {ip.name for ip in index_params}
+        if len(index_names) != len(index_params):
             raise ValueError('duplicate index names')
-        self.indices = {index.name: index for index in indices_c}
+        self.indexes = {ip.name: [HashIndex(ip)] for ip in index_params}
+        self.index_nums = {}
 
-        for index in self.indices.values():
-            self.index_storage[index.name] = IndexStorage(
-                IndexBTrees[index.key_type](), Int64Set()
-            )
+        for i, index in enumerate(self._iter_indexes()):
+            assert index.number is None
+            index.number = i
+            self.index_nums[index.params.name] = i
 
         if objects is not None:
             for obj in objects:
                 self.add(obj)
 
     def add(self, obj: _T) -> None:
-        obj_id = self.id_from_obj(obj)
+        obj_id = ido.id_from_obj(obj)
         if obj_id in self.all_items:
             raise ValueError('item already exists')
-        im, tacs = self._make_index_memory(obj)
-        for value, storage in zip(im, self.index_storage.values()):
-            self._add_to_storage(storage, value, obj_id)
-        for tac in tacs:
-            self._add_to_tree(self.tacs_to_items, tac, obj_id)
+
         self.all_items[obj_id] = obj
-        self._store_index_memory(obj)
+
+        im_ls = []
+        for index in self._iter_indexes():
+            val = index.add(obj, self)
+            im_ls.append(val)
+
+        self.index_memory[obj_id] = tuple(im_ls)
+
         self.rowid_to_items[obj_id] = self._rowid_counter
         self.items_to_rowid[self._rowid_counter] = obj_id
+
         self._rowid_counter += 1
         self.count += 1
 
     def remove(self, obj: _T) -> None:
-        obj_id = self.id_from_obj(obj)
+        obj_id = ido.id_from_obj(obj)
         if obj_id not in self.all_items:
             raise ValueError('item not found')
-        im, tacs = self._get_index_memory(obj_id)
-        for value, storage in zip(im, self.index_storage.values()):
-            self._discard_from_storage(storage, value, obj_id)
-        for tac in tacs:
-            self._discard_from_tree(self.tacs_to_items, tac, obj_id)
-        del self.all_items[obj_id]
-        self._del_index_memory(obj)
+
         rowid = self.rowid_to_items[obj_id]
-        del self.items_to_rowid[obj_id]
         del self.rowid_to_items[rowid]
+        del self.items_to_rowid[obj_id]
+
+        for index, mem in zip(self._iter_indexes(), self.index_memory[obj_id]):
+            index.remove(obj, self, mem)
+
+        del self.index_memory[obj_id]
+
+        del self.all_items[obj_id]
         self.count -= 1
 
     def update(self, obj: _T) -> None:
-        if not self._mutable_objects:
-            raise ValueError('objects are not mutable')
-        obj_id = self.id_from_obj(obj)
+        obj_id = ido.id_from_obj(obj)
         if obj_id not in self.all_items:
             raise ValueError('item not found')
-        im, tacs = self.index_memory[obj_id]
-        new_im, new_tacs = self._make_index_memory(obj)
-        for v, nv, storage in zip(im, new_im, self.index_storage.values()):
-            if im == new_im:
-                continue
-            self._discard_from_storage(storage, v, obj_id)
-            self._add_to_storage(storage, nv, obj_id)
-        tacs_set, new_tacs_set = set(tacs), set(new_tacs)
-        added_tacs = new_tacs_set - tacs_set
-        removed_tacs = tacs_set - new_tacs_set
-        for tac in added_tacs:
-            self._add_to_tree(self.tacs_to_items, tac, obj_id)
-        for tac in removed_tacs:
-            self._discard_from_tree(self.tacs_to_items, tac, obj_id)
-        self.index_memory[obj_id] = IndexMemory(new_im, new_tacs)
+
+        old_im = self.index_memory[obj_id]
+        new_im_ls = []
+
+        for old_v, index in zip(old_im, self._iter_indexes()):
+            new_v = index.make_val(obj, self)
+            if old_v != new_v:
+                index.update(obj, self, old_v, new_v)
+            new_im_ls.append(new_v)
+
+        self.index_memory[obj_id] = tuple(new_im_ls)
 
     def set_default(self, obj: _T) -> None:
         self._default_obj = obj
@@ -233,8 +181,28 @@ class Wut(T.Generic[_T]):
     def default_obj(self):
         raise NotImplementedError
 
+    def getattr(self, obj: _T, item: str | Index) -> T.Any:
+        if isinstance(item, Index):
+            obj_id = ido.id_from_obj(obj)
+            mem = self.index_memory[obj_id]
+            if mem is not None:
+                assert item.number is not None
+                return mem[item.number]
+            attr_name = item.params.name
+        else:
+            attr_name = item
+
+        if attr_name.startswith('`'):
+            return self.attrs[attr_name](obj)
+        else:
+            return getattr(obj, attr_name)
+
+    def get_index_memory(self, obj: _T) -> T.Optional[tuple]:
+        obj_id = ido.id_from_obj(obj)
+        return self.index_memory[obj_id]
+
     def __contains__(self, obj: _T) -> bool:
-        obj_id = self.id_from_obj(obj)
+        obj_id = ido.id_from_obj(obj)
         return obj_id in self.all_items
 
     def __iter__(self) -> T.Iterator[_T]:
@@ -243,25 +211,13 @@ class Wut(T.Generic[_T]):
     def __len__(self) -> int:
         return self.count
 
-    def get_indices(self) -> list[str]:
-        return list(self.indices)
-
-    def match_count(self, index: str, operator: str, value):
-        # TODO
-        raise NotImplementedError
-
-    def match(self, index: str, operator: str, value, intersection=None):
-        # TODO
-        raise NotImplementedError
-
     def sort_ids(self, ids, ordering: list[tuple[str, bool]] = None):
         if ordering is None:
             ordering = []
         order_index_n: list[tuple[int, bool]] = []
-        index_names = list(self.indices)
 
         for oi, desc in ordering:
-            order_index_n.append((index_names.index(oi[0]), desc))
+            order_index_n.append((self.index_nums[oi], desc))
         if not ordering:
             rowid_desc = False
         else:
@@ -279,29 +235,13 @@ class Wut(T.Generic[_T]):
 
     def ids_to_objects(self, ids, ordering: list[tuple[str, bool]] = None):
         ids_sorted = self.sort_ids(ids, ordering)
-        return [self.obj_from_id(id) for id in ids_sorted]
+        return [ido.obj_from_id(id) for id in ids_sorted]
 
-    def _get_index_memory(self, id_) -> IndexMemory:
-        if self._mutable_objects:
-            return self.index_memory[id_]
-        else:
-            obj = self.obj_from_id(id_)
-            return self._make_index_memory(obj)
-
-    def _store_index_memory(self, obj):
-        if self._mutable_objects:
-            self.index_memory[self.id_from_obj(obj)] = self._make_index_memory(obj)
+    def _store_index_memory(self, obj, im: tuple):
+        self.index_memory[ido.id_from_obj(obj)] = im
 
     def _del_index_memory(self, obj):
-        if self._mutable_objects:
-            del self.index_memory[self.id_from_obj(obj)]
-
-    def _make_index_memory(self, obj) -> IndexMemory:
-        # TODO litetuple to save more memory??
-        return IndexMemory(
-            tuple(*[index.get_from_obj(obj) for index in self.indices.values()]),
-            obj.get_tac_ids(),
-        )
+        del self.index_memory[ido.id_from_obj(obj)]
 
     @staticmethod
     def _add_to_storage(storage: IndexStorage, key, value: int):
@@ -331,3 +271,8 @@ class Wut(T.Generic[_T]):
             del tree[key]
         else:
             tree[key] = new
+
+    def _iter_indexes(self) -> T.Iterator[Index]:
+        for indexes in self.indexes.values():
+            for index in indexes:
+                yield index
