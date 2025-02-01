@@ -142,11 +142,11 @@ class Wut(Context[_T]):
         planner: Planner | None = None,
         optimizer: Rule | None = None,
     ):
+        self.indexes = {}
         self.attrs = attrs or {}
         self.planner = planner or Planner()
         self.optimizer = optimizer or Chain()
         self.parser = parser or Parser()
-        indexes = indexes or []
 
         self.all_items = LOBTree()
         self.all_item_ids = Int64Set()
@@ -156,11 +156,7 @@ class Wut(Context[_T]):
         self.count = 0
         self._rowid_counter = 0
 
-        assert len(indexes) > 0, 'at least one index is required'
-        indexes2: list[Index] = [
-            HashIndex(i) if isinstance(i, (str, IndexParams)) else i for i in indexes
-        ]
-
+        indexes = indexes or []
         for ip in indexes:
             index: Index
             if isinstance(ip, (str, IndexParams)):
@@ -243,8 +239,8 @@ class Wut(Context[_T]):
 
         self.index_memory[obj_id] = tuple(im_ls)
 
-        self.rowid_to_items[obj_id] = self._rowid_counter
-        self.items_to_rowid[self._rowid_counter] = obj_id
+        self.rowid_to_items[self._rowid_counter] = obj_id
+        self.items_to_rowid[obj_id] = self._rowid_counter
 
         self._rowid_counter += 1
         self.count += 1

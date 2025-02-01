@@ -42,17 +42,17 @@ class Index(T.Protocol[_T]):
     params: IndexParams
     number: int | None
 
-    def add(self, obj: _T, ctx: Context[_T], val: T.Any = None) -> T.Any:
+    def add(self, obj: _T, ctx: 'Context[_T]', val: T.Any = None) -> T.Any:
         """
         Add `obj` to the index
         Returns a storable version of the vals.
         """
 
-    def remove(self, obj: _T, ctx: Context[_T], val: T.Any = None) -> None:
+    def remove(self, obj: _T, ctx: 'Context[_T]', val: T.Any = None) -> None:
         """Remove `obj` from the index"""
 
     def refresh(
-        self, obj: _T, ctx: Context[_T], old_val: T.Any, new_val: T.Any = None
+        self, obj: _T, ctx: 'Context[_T]', old_val: T.Any, new_val: T.Any = None
     ) -> None:
         """Update `obj` in the index"""
 
@@ -70,7 +70,7 @@ class Index(T.Protocol[_T]):
             `IndexLoop` plan if it can.
         """
 
-    def make_val(self, obj: _T, ctx: Context[_T]) -> T.Any:
+    def make_val(self, obj: _T, ctx: 'Context[_T]') -> T.Any:
         """
         Make a storable version of the attribute value for the given object
         """
@@ -129,7 +129,7 @@ class HashIndex(SupportsLookup, Index[_T]):
             self.none_set = Int64Set()
         self.number = None
 
-    def add(self, obj: _T, ctx: Context[_T], val: T.Any = None) -> list:
+    def add(self, obj: _T, ctx: 'Context[_T]', val: T.Any = None) -> list:
         obj_id = ido.id_from_obj(obj)
         ret_vals = []
         if val is None:
@@ -147,7 +147,7 @@ class HashIndex(SupportsLookup, Index[_T]):
             ret_vals.append(v)
         return self._store_val(ret_vals)
 
-    def remove(self, obj: _T, ctx: Context[_T], val: T.Any = None) -> None:
+    def remove(self, obj: _T, ctx: 'Context[_T]', val: T.Any = None) -> None:
         obj_id = ido.id_from_obj(obj)
         if val is None:
             val = self._extract_val(obj, ctx)
@@ -167,7 +167,7 @@ class HashIndex(SupportsLookup, Index[_T]):
                     self.tree[v] = dest_set2
 
     def refresh(
-        self, obj: _T, ctx: Context[_T], old_val: T.Any, new_val: T.Any = None
+        self, obj: _T, ctx: 'Context[_T]', old_val: T.Any, new_val: T.Any = None
     ) -> None:
         obj_id = ido.id_from_obj(obj)
         old_val = self._load_val(old_val)
@@ -305,7 +305,7 @@ class InvertedIndex(HashIndex[_T]):
 
     no_none_allowed = True
 
-    def _extract_val(self, obj: _T, ctx: Context[_T]) -> T.Iterable[T.Any]:
+    def _extract_val(self, obj: _T, ctx: 'Context[_T]') -> T.Iterable[T.Any]:
         for val in ctx.getattr(obj, self.params.name):
             # TODO throw if None
             yield val
