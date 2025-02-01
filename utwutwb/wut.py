@@ -15,7 +15,7 @@ import utwutwb.set_ops as so
 from utwutwb import condition as cond
 from utwutwb.condition import Attribute, BinOp, Condition, Literal, UnaryOp
 from utwutwb.context import Context
-from utwutwb.index import HashIndex, Index, IndexParams
+from utwutwb.index import Index, IndexParams, RangeIndex
 from utwutwb.optimize import Chain, Rule
 from utwutwb.parse import Parser
 from utwutwb.plan import (
@@ -66,7 +66,7 @@ class WutSortKey:
                 return not descending
             if sm > om:
                 return descending
-        return (self.rowid < other.rowid) != descending
+        return (self.rowid < other.rowid) != self.rowid_desc
 
 
 ComputedAttrs = dict[str, T.Callable[[_T], T.Any]]
@@ -160,7 +160,7 @@ class Wut(Context[_T]):
         for ip in indexes:
             index: Index
             if isinstance(ip, (str, IndexParams)):
-                index = HashIndex(ip)
+                index = RangeIndex(ip)
             else:
                 assert isinstance(ip, Index)
                 index = ip

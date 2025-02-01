@@ -44,6 +44,9 @@ class Bound:
     value: Comparable
     inclusive: bool
 
+    def symbol(self) -> str:
+        return '<=' if self.inclusive else '<'
+
 
 OptionalBound = Bound | Unset
 
