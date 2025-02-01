@@ -170,6 +170,7 @@ setups:
   - a: [1, 2]
   - a: [2, 3]
   - a: [3, 4]
+  inverted_indexes: True
   indexes: [a]
   tests:
   - title: InvertedIndex

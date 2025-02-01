@@ -6,6 +6,7 @@ from ruamel.yaml import YAML
 
 from utwutwb.condition import attr, or_
 from utwutwb.container import Container
+from utwutwb.index import InvertedIndex, RangeIndex
 from utwutwb.wut import Wut
 
 FIXTURE_DIR = os.path.join(os.path.dirname(__file__), 'fixtures')
@@ -25,7 +26,16 @@ class TestWut(TestCase):
             objects = {i: Container(o) for i, o in enumerate(setup['objects'])}
             objects_to_id = {v: k for k, v in objects.items()}
 
-            iset = Wut(objs=set(objects.values()), indexes=setup['indexes'])
+            indexes = []
+
+            for yaml_index in setup['indexes']:
+                if setup.get('inverted_indexes'):
+                    index = InvertedIndex(yaml_index)
+                else:
+                    index = RangeIndex(yaml_index)
+                indexes.append(index)
+
+            iset = Wut(set(objects.values()), indexes=indexes)
 
             for test in setup['tests']:
                 title = test['title']
@@ -53,6 +63,7 @@ class TestWut(TestCase):
                     yaml.dump(fixture, fp)
 
     def test_set_abc(self):
+        # TODO only works because id of int happens to be the same...
         a = Wut([1, 2, 3])
         b = Wut([2, 3, 4])
         self.assertEqual(Wut([2, 3]), a & b)
@@ -70,14 +81,18 @@ class TestWut(TestCase):
 
         self.assertEqual(
             {objs[0], objs[1]},
-            iset.filter(
-                or_(
-                    attr('x').eq(1).and_(attr('y').in_([1, 2])),
-                    attr('x').eq(2),
+            set(
+                iset.ids_to_objects(
+                    iset.filter(
+                        or_(
+                            attr('x').eq(1).and_(attr('y').in_([1, 2])),
+                            attr('x').eq(2),
+                        )
+                    )
                 )
             ),
         )
         self.assertEqual(
             {objs[0], objs[1]},
-            iset.filter(attr('x').eq(3).not_()),
+            set(iset.ids_to_objects(iset.filter(attr('x').eq(3).not_()))),
         )

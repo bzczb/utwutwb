@@ -72,8 +72,24 @@ class WutSortKey:
 ComputedAttrs = dict[str, T.Callable[[_T], T.Any]]
 
 
-@attr.s(init=False)
-class Wut(Context[_T]):
+def int64set_intersection(*sets):
+    if not sets:
+        return Int64Set()
+    if len(sets) == 1:
+        return sets[0]
+    return sets[0].intersection(*sets[1:])
+
+
+def int64set_union(*sets):
+    if not sets:
+        return Int64Set()
+    if len(sets) == 1:
+        return sets[0]
+    return sets[0].union(*sets[1:])
+
+
+@attr.s(init=False, cmp=False)
+class Wut(Context[_T], T.MutableSet):
     BINOPS = {
         cond.Add: operator.add,
         cond.Div: operator.truediv,
@@ -135,9 +151,10 @@ class Wut(Context[_T]):
 
     def __init__(
         self,
+        objs: T.Iterable[_T] = None,
+        *,
         attrs: ComputedAttrs = None,
         indexes: T.Sequence[Index | IndexParams | str] = None,
-        objs: T.Iterable[_T] = None,
         parser: Parser | None = None,
         planner: Planner | None = None,
         optimizer: Rule | None = None,
@@ -184,10 +201,10 @@ class Wut(Context[_T]):
                 self.execute(plan.input),  # type: ignore
                 plan.condition,  # type: ignore
             ),
-            Union: lambda plan: Int64Set().union(
+            Union: lambda plan: int64set_union(
                 *(self.execute(i) for i in plan.inputs)  # type: ignore
             ),
-            Intersect: lambda plan: Int64Set().intersection(
+            Intersect: lambda plan: int64set_intersection(
                 *(self.execute(i) for i in plan.inputs)  # type: ignore
             ),
             IndexLookup: lambda plan: plan.index.lookup(plan.value),  # type: ignore
@@ -227,7 +244,7 @@ class Wut(Context[_T]):
     def add(self, obj: _T) -> None:
         obj_id = ido.id_from_obj(obj)
         if obj_id in self.all_items:
-            raise ValueError('item already exists')
+            return
 
         self.all_items[obj_id] = obj
         self.all_item_ids.add(obj_id)
@@ -244,6 +261,13 @@ class Wut(Context[_T]):
 
         self._rowid_counter += 1
         self.count += 1
+
+    def discard(self, obj: _T) -> None:
+        obj_id = ido.id_from_obj(obj)
+        if obj_id not in self.all_items:
+            return
+
+        self.remove(obj)
 
     def remove(self, obj: _T) -> None:
         obj_id = ido.id_from_obj(obj)
@@ -335,7 +359,7 @@ class Wut(Context[_T]):
 
         raise ValueError(f'Unsupported condition: {condition}')
 
-    def __contains__(self, obj: _T) -> bool:
+    def __contains__(self, obj: object) -> bool:
         obj_id = ido.id_from_obj(obj)
         return obj_id in self.all_items
 
