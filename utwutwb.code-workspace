@@ -1,0 +1,40 @@
+{
+	"folders": [
+		{
+			"path": "."
+		}
+	],
+	"settings": {
+		"editor.formatOnSave": true,
+		"files.exclude": {
+			"**/.git": true,
+			"**/.svn": true,
+			"**/.hg": true,
+			"**/CVS": true,
+			"**/.DS_Store": true,
+			"**/Thumbs.db": true,
+			"**/py_venv": true,
+			"**/.cache": true,
+			"**/.mypy_cache": true,
+			"**/ext": true,
+			"**/*.mo": true,
+			"**/*.po": true,
+		},
+		"mypy.runUsingActiveInterpreter": true,
+		"mypy.extraArguments": [
+			"--disable-error-code=import-untyped"
+		],
+		"mypy.configFile": "./pyproject.toml",
+		"mypy.targets": [
+			"./utwutwb",
+		],
+		"ruff.format.args": [
+			"--config=./pyproject.toml"
+		],
+		"ruff.lint.run": "onType",
+		"ruff.lint.args": [
+			"--preview"
+		],
+		"ruff.organizeImports": true,
+	}
+}

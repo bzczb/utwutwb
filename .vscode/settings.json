@@ -1,0 +1,13 @@
+{
+    "[python]": {
+        "editor.codeActionsOnSave": {
+            "source.organizeImports": "explicit"
+        }
+    },
+    "explorer.excludeGitIgnore": true,
+    // stuff that pylance frequently gets wrong
+    "python.analysis.diagnosticSeverityOverrides": {
+        "reportUndefinedVariable": "none",
+        "reportMissingImports": "none"
+    }
+}

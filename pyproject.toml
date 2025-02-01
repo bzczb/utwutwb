@@ -1,0 +1,47 @@
+[project]
+name = "utwutwb"
+version = "0.1.0"
+description = ""
+authors = [
+    {name = "bzczb"}
+]
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "attrs",
+    "BTrees",
+    "cykhash"
+]
+
+[tool.poetry.group.dev.dependencies]
+ruff = "*"
+ruamel-yaml = "*"
+mypy = "*"
+pre-commit = "*"
+
+[build-system]
+requires = ["poetry-core>=2.0.0,<3.0.0"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.mypy]
+disable_error_code = ['annotation-unchecked', 'var-annotated']
+no_implicit_optional = false
+
+[tool.ruff]
+include = ['pyproject.toml', 'src/**/*.py', 'src/**/*.pyi']
+
+[tool.ruff.lint]
+select = ['E', 'F']
+# select = ['E', 'F', 'D']
+# E501: line too long
+# F821: undefined name
+# F841: local variable name is assigned but never used
+# D100: missing docstring in public module
+# D102: missing docstring in public method
+ignore = ['E501', 'F821', 'F841', 'D100', 'D102']
+
+[tool.ruff.lint.pydocstyle]
+convention = 'pep257'
+
+[tool.ruff.format]
+quote-style = 'single'
