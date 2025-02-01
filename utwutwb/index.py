@@ -51,7 +51,7 @@ class Index(T.Protocol[_T]):
     def remove(self, obj: _T, ctx: Context[_T], val: T.Any = None) -> None:
         """Remove `obj` from the index"""
 
-    def update(
+    def refresh(
         self, obj: _T, ctx: Context[_T], old_val: T.Any, new_val: T.Any = None
     ) -> None:
         """Update `obj` in the index"""
@@ -81,32 +81,32 @@ class Index(T.Protocol[_T]):
 
 
 @T.runtime_checkable
-class SupportsLookup(T.Protocol[_T]):
-    def lookup(self, value: T.Any) -> list[_T]:
+class SupportsLookup(T.Protocol):
+    def lookup(self, value: T.Any) -> Int64Set:
         """
         Get members from the index.
 
         Args:
             value: Attribute value to lookup
         Returns:
-            Result list
+            Result ID set
         """
 
 
 @T.runtime_checkable
-class SupportsRange(T.Protocol[_T]):
-    def range(self, range: 'Range') -> list[_T]:
+class SupportsRange(T.Protocol):
+    def range(self, range: 'Range') -> Int64Set:
         """
         Get members from the index base on a range of values.
 
         Args:
             range: Range
         Returns:
-            Result list
+            Result ID set
         """
 
 
-class HashIndex(SupportsLookup[_T], Index[_T]):
+class HashIndex(SupportsLookup, Index[_T]):
     """
     Hash table index.
 
@@ -166,7 +166,7 @@ class HashIndex(SupportsLookup[_T], Index[_T]):
                 elif dest_set is not dest_set2:
                     self.tree[v] = dest_set2
 
-    def update(
+    def refresh(
         self, obj: _T, ctx: Context[_T], old_val: T.Any, new_val: T.Any = None
     ) -> None:
         obj_id = ido.id_from_obj(obj)
@@ -208,12 +208,12 @@ class HashIndex(SupportsLookup[_T], Index[_T]):
     def make_val(self, obj, ctx):
         return self._store_val(list(self._extract_val(obj, ctx)))
 
-    def lookup(self, val: T.Any) -> list[_T]:
+    def lookup(self, val: T.Any) -> Int64Set:
         if val is None:
             obj_ids = self.none_set
         else:
             obj_ids = so.iterate(self.tree.get(val, None))
-        return [ido.obj_from_id(obj_id) for obj_id in obj_ids]
+        return Int64Set(obj_ids)
 
     def match(self, condition: 'BinOp', operand: 'Condition') -> 'T.Optional[Plan]':
         if isinstance(condition, Eq) and isinstance(operand, Literal):
@@ -246,7 +246,7 @@ class HashIndex(SupportsLookup[_T], Index[_T]):
         return f'{self.__class__.__name__}({self.params.name})'
 
 
-class RangeIndex(SupportsRange[_T], HashIndex[_T]):
+class RangeIndex(SupportsRange, HashIndex[_T]):
     INVERSE_COMPARISONS: dict[T.Type[BinOp], T.Type[BinOp]] = {
         Lt: Gt,
         Gt: Lt,
@@ -261,7 +261,7 @@ class RangeIndex(SupportsRange[_T], HashIndex[_T]):
         Ge: lambda val: Range(left=Bound(val, True)),
     }
 
-    def range(self, range: Range[T.Any]) -> list[_T]:
+    def range(self, range: Range[T.Any]) -> Int64Set:
         if type(range.left) == Unset:  # noqa
             left = None
             excludemin = False
@@ -283,7 +283,7 @@ class RangeIndex(SupportsRange[_T], HashIndex[_T]):
         result_set = Int64Set()
         for val in vals:
             result_set.update(so.iterate(val))
-        return [ido.obj_from_id(obj_id) for obj_id in result_set]
+        return result_set
 
     def match(self, condition: BinOp, operand: Condition) -> T.Optional[Plan]:
         if isinstance(condition, self.COMPARISONS) and isinstance(operand, Literal):

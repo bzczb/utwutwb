@@ -1,3 +1,4 @@
+import operator
 import struct
 import typing as T
 from functools import partial
@@ -7,11 +8,27 @@ from BTrees.Interfaces import IBTree
 from BTrees.LLBTree import LLBTree
 from BTrees.LOBTree import LOBTree
 from cykhash import Int64Set
+from sqlglot import exp
 
 import utwutwb.id_ops as ido
 import utwutwb.set_ops as so
+from utwutwb import condition as cond
+from utwutwb.condition import Attribute, BinOp, Condition, Literal, UnaryOp
 from utwutwb.context import Context
 from utwutwb.index import HashIndex, Index, IndexParams
+from utwutwb.optimize import Chain, Rule
+from utwutwb.parse import Parser
+from utwutwb.plan import (
+    Empty,
+    Filter,
+    IndexLookup,
+    IndexRange,
+    Intersect,
+    Plan,
+    Planner,
+    ScanFilter,
+    Union,
+)
 
 ADDRESS_SIZE = struct.calcsize('P')
 assert ADDRESS_SIZE == 8, '64-bit address size required'
@@ -55,14 +72,44 @@ class WutSortKey:
 ComputedAttrs = dict[str, T.Callable[[_T], T.Any]]
 
 
-@attr.s(slots=True, kw_only=True, init=False)
+@attr.s(init=False)
 class Wut(Context[_T]):
+    BINOPS = {
+        cond.Add: operator.add,
+        cond.Div: operator.truediv,
+        cond.FloorDiv: operator.floordiv,
+        cond.BitwiseAnd: operator.and_,
+        cond.Xor: operator.xor,
+        cond.BitwiseOr: operator.or_,
+        cond.Pow: operator.pow,
+        cond.Is: operator.is_,
+        cond.Lshift: operator.lshift,
+        cond.Mod: operator.mod,
+        cond.Mul: operator.mul,
+        cond.Rshift: operator.rshift,
+        cond.Sub: operator.sub,
+        cond.Lt: operator.lt,
+        cond.Le: operator.le,
+        cond.Gt: operator.gt,
+        cond.Ge: operator.ge,
+        cond.Eq: operator.eq,
+        cond.Ne: operator.ne,
+        cond.And: lambda l, r: l and r,
+        cond.Or: lambda l, r: l or r,
+        cond.In: lambda l, r: l in r,
+    }
+    UNARY_OPS = {
+        cond.Not: operator.not_,
+        cond.Invert: operator.invert,
+    }
+
     all_items: IBTree = attr.ib()
     """
     map of item id to item
     keep items around so they don't get deleted;
     otherwise we cast id directly to item
     """
+    all_item_ids: Int64Set = attr.ib()
     index_memory: IBTree = attr.ib()
     """map of item id to remembered index values"""
     items_to_rowid: IBTree = attr.ib()
@@ -89,38 +136,97 @@ class Wut(Context[_T]):
     def __init__(
         self,
         attrs: ComputedAttrs = None,
-        indexes: T.Sequence[IndexParams | str] = None,
-        objects: T.Iterable[_T] = None,
+        indexes: T.Sequence[Index | IndexParams | str] = None,
+        objs: T.Iterable[_T] = None,
+        parser: Parser | None = None,
+        planner: Planner | None = None,
+        optimizer: Rule | None = None,
     ):
         self.attrs = attrs or {}
+        self.planner = planner or Planner()
+        self.optimizer = optimizer or Chain()
+        self.parser = parser or Parser()
         indexes = indexes or []
 
         self.all_items = LOBTree()
+        self.all_item_ids = Int64Set()
         self.index_memory = LOBTree()
-        self.tacs_to_items = LOBTree()
         self.items_to_rowid = LLBTree()
         self.rowid_to_items = LLBTree()
         self.count = 0
         self._rowid_counter = 0
 
         assert len(indexes) > 0, 'at least one index is required'
-        index_params = [
-            ip if isinstance(ip, IndexParams) else IndexParams(ip) for ip in indexes
+        indexes2: list[Index] = [
+            HashIndex(i) if isinstance(i, (str, IndexParams)) else i for i in indexes
         ]
-        index_names = {ip.name for ip in index_params}
-        if len(index_names) != len(index_params):
-            raise ValueError('duplicate index names')
-        self.indexes = {ip.name: [HashIndex(ip)] for ip in index_params}
-        self.index_nums = {}
 
+        for ip in indexes:
+            index: Index
+            if isinstance(ip, (str, IndexParams)):
+                index = HashIndex(ip)
+            else:
+                assert isinstance(ip, Index)
+                index = ip
+            self.indexes.setdefault(index.params.name, []).append(index)
+
+        self.index_nums = {}
         for i, index in enumerate(self._iter_indexes()):
             assert index.number is None
             index.number = i
             self.index_nums[index.params.name] = i
 
-        if objects is not None:
-            for obj in objects:
-                self.add(obj)
+        if objs is not None:
+            self.update(objs)
+
+        self.executors: dict[T.Type[Plan], T.Callable[[Plan], Int64Set]] = {
+            ScanFilter: lambda plan: self._execute_filter(
+                self.all_item_ids,
+                plan.condition,  # type: ignore
+            ),
+            Filter: lambda plan: self._execute_filter(
+                self.execute(plan.input),  # type: ignore
+                plan.condition,  # type: ignore
+            ),
+            Union: lambda plan: Int64Set().union(
+                *(self.execute(i) for i in plan.inputs)  # type: ignore
+            ),
+            Intersect: lambda plan: Int64Set().intersection(
+                *(self.execute(i) for i in plan.inputs)  # type: ignore
+            ),
+            IndexLookup: lambda plan: plan.index.lookup(plan.value),  # type: ignore
+            IndexRange: lambda plan: plan.index.range(plan.range),  # type: ignore
+            Empty: lambda plan: Int64Set(),  # type: ignore
+        }
+
+        def match_binop(
+            op: T.Callable[[T.Any, T.Any], T.Any],
+        ) -> T.Callable[[BinOp, _T], T.Any]:
+            def matcher(condition: BinOp, obj: _T) -> T.Any:
+                return op(
+                    self.match(condition.left, obj), self.match(condition.right, obj)
+                )
+
+            return matcher
+
+        def match_unaryop(
+            op: T.Callable[[T.Any], T.Any],
+        ) -> T.Callable[[UnaryOp, _T], T.Any]:
+            def matcher(condition: UnaryOp, obj: _T) -> T.Any:
+                return op(self.match(condition.operand, obj))
+
+            return matcher
+
+        self.matchers: dict[T.Type[Condition], T.Callable[[Condition, _T], T.Any]] = {
+            Literal: lambda condition, obj: condition.value,  # type: ignore
+            Attribute: lambda condition, obj: self.getattr(obj, condition.name),  # type: ignore
+            cond.Array: lambda condition, obj: {
+                self.match(i, obj)
+                for i in condition.items  # type: ignore
+            },
+            **{klass: match_binop(op) for klass, op in self.BINOPS.items()},  # type: ignore
+            **{klass: match_unaryop(op) for klass, op in self.UNARY_OPS.items()},  # type: ignore
+        }
 
     def add(self, obj: _T) -> None:
         obj_id = ido.id_from_obj(obj)
@@ -128,6 +234,7 @@ class Wut(Context[_T]):
             raise ValueError('item already exists')
 
         self.all_items[obj_id] = obj
+        self.all_item_ids.add(obj_id)
 
         im_ls = []
         for index in self._iter_indexes():
@@ -157,9 +264,10 @@ class Wut(Context[_T]):
         del self.index_memory[obj_id]
 
         del self.all_items[obj_id]
+        self.all_item_ids.discard(obj_id)
         self.count -= 1
 
-    def update(self, obj: _T) -> None:
+    def refresh(self, obj: _T) -> None:
         obj_id = ido.id_from_obj(obj)
         if obj_id not in self.all_items:
             raise ValueError('item not found')
@@ -170,10 +278,14 @@ class Wut(Context[_T]):
         for old_v, index in zip(old_im, self._iter_indexes()):
             new_v = index.make_val(obj, self)
             if old_v != new_v:
-                index.update(obj, self, old_v, new_v)
+                index.refresh(obj, self, old_v, new_v)
             new_im_ls.append(new_v)
 
         self.index_memory[obj_id] = tuple(new_im_ls)
+
+    def update(self, objs: T.Iterable[_T]) -> None:
+        for obj in objs:
+            self.add(obj)
 
     def set_default(self, obj: _T) -> None:
         self._default_obj = obj
@@ -201,6 +313,32 @@ class Wut(Context[_T]):
         obj_id = ido.id_from_obj(obj)
         return self.index_memory[obj_id]
 
+    def filter(self, condition: T.Union[Condition, str, exp.Expression]) -> Int64Set:
+        plan = self.plan(condition)
+        plan = self.optimize(plan)
+        return self.execute(plan)
+
+    def plan(self, condition: T.Union[Condition, str, exp.Expression]) -> Plan:
+        if isinstance(condition, (str, exp.Expression)):
+            condition = self.parser.parse(condition)
+        return self.planner.plan(condition)
+
+    def optimize(self, plan: Plan) -> Plan:
+        return self.optimizer(plan, self)
+
+    def execute(self, plan: Plan) -> Int64Set:
+        executor = self.executors.get(plan.__class__)
+        if executor:
+            return executor(plan)
+        raise ValueError(f'Unsupported plan: {plan}')
+
+    def match(self, condition: Condition, obj: _T) -> T.Any:
+        matcher = self.matchers.get(condition.__class__)
+        if matcher:
+            return matcher(condition, obj)
+
+        raise ValueError(f'Unsupported condition: {condition}')
+
     def __contains__(self, obj: _T) -> bool:
         obj_id = ido.id_from_obj(obj)
         return obj_id in self.all_items
@@ -211,7 +349,7 @@ class Wut(Context[_T]):
     def __len__(self) -> int:
         return self.count
 
-    def sort_ids(self, ids, ordering: list[tuple[str, bool]] = None):
+    def sort_ids(self, ids: T.Iterable[int], ordering: list[tuple[str, bool]] = None):
         if ordering is None:
             ordering = []
         order_index_n: list[tuple[int, bool]] = []
@@ -276,3 +414,19 @@ class Wut(Context[_T]):
         for indexes in self.indexes.values():
             for index in indexes:
                 yield index
+
+    def _execute_filter(self, objs: Int64Set, condition: Condition) -> Int64Set:
+        if isinstance(condition, Literal):
+            return objs if condition.value else set()
+        return Int64Set(
+            filter(lambda o: self.match(condition, ido.obj_from_id(o)), objs)
+        )
+
+    # def _infer_index(self, attr: str) -> Index[_T]:
+    #     obj = next(iter(self.objs))
+    #     value = self.getattr(obj, attr)
+    #     if isinstance(value, (list, tuple, dict, set)):
+    #         return InvertedIndex(attr)
+    #     if isinstance(value, array.array):
+    #         return InvertedArrayIndex(attr)
+    #     return HashIndex(attr)
