@@ -37,13 +37,14 @@ _T = T.TypeVar('_T')
 
 
 @attr.s(slots=True)
-class IndexStorage:
-    tree: IBTree = attr.ib()
-    none_set: Int64Set = attr.ib()
+class ObjectStorage(T.Generic[_T]):
+    obj: _T = attr.ib()
+    rowid: int = attr.ib()
+    index_mem: tuple = attr.ib(init=False)
 
 
 class WutSortKey:
-    __slots__ = ('mem', 'ordering', 'id_', 'rowid', 'rowid_desc')
+    __slots__ = ('obj_sto', 'ordering', 'rowid_desc')
 
     def __init__(
         self,
@@ -52,20 +53,18 @@ class WutSortKey:
         rowid_desc: bool,
         id_: int,
     ):
-        self.mem = wut.index_memory[id_]
+        self.obj_sto: ObjectStorage = wut.all_items[id_]
         self.ordering = ordering
         self.rowid_desc = rowid_desc
-        self.id_ = id_
-        self.rowid = wut.items_to_rowid[id_]
 
     def __lt__(self, other: T.Self):
         for index, descending in self.ordering:
-            sm, om = self.mem[index], other.mem[index]
+            sm, om = self.obj_sto.index_mem[index], other.obj_sto.index_mem[index]
             if sm < om:
                 return not descending
             if sm > om:
                 return descending
-        return (self.rowid < other.rowid) != self.rowid_desc
+        return (self.obj_sto.rowid < other.obj_sto.rowid) != self.rowid_desc
 
 
 ComputedAttrs = dict[str, T.Callable[[_T], T.Any]]
@@ -120,15 +119,10 @@ class Wut(Context[_T], T.MutableSet):
 
     all_items: IBTree = attr.ib()
     """
-    map of item id to item
+    map of item id to ObjectStorage
     keep items around so they don't get deleted;
-    otherwise we cast id directly to item
+    other than that we cast id directly to item
     """
-    all_item_ids: Int64Set = attr.ib()
-    index_memory: IBTree = attr.ib()
-    """map of item id to remembered index values"""
-    items_to_rowid: IBTree = attr.ib()
-    """map of item id to row id"""
     rowid_to_items: IBTree = attr.ib()
     """map of row id to item id"""
 
@@ -167,9 +161,6 @@ class Wut(Context[_T], T.MutableSet):
         self._default_obj = default_obj
 
         self.all_items = LOBTree()
-        self.all_item_ids = Int64Set()
-        self.index_memory = LOBTree()
-        self.items_to_rowid = LLBTree()
         self.rowid_to_items = LLBTree()
         self.count = 0
         self._rowid_counter = 0
@@ -195,7 +186,7 @@ class Wut(Context[_T], T.MutableSet):
 
         self.executors: dict[T.Type[Plan], T.Callable[[Plan], Int64Set]] = {
             ScanFilter: lambda plan: self._execute_filter(
-                self.all_item_ids,
+                self.all_items,
                 plan.condition,  # type: ignore
             ),
             Filter: lambda plan: self._execute_filter(
@@ -247,35 +238,31 @@ class Wut(Context[_T], T.MutableSet):
         if obj_id in self.all_items:
             return
 
-        self.all_items[obj_id] = obj
-        self.all_item_ids.add(obj_id)
+        obj_sto = ObjectStorage(obj, self._rowid_counter)
+        self.all_items[obj_id] = obj_sto
 
         im_ls = []
         for index in self._iter_indexes():
             val = index.add(obj, self)
             im_ls.append(val)
 
-        self.index_memory[obj_id] = tuple(im_ls)
-
+        obj_sto.index_mem = tuple(im_ls)
         self.rowid_to_items[self._rowid_counter] = obj_id
-        self.items_to_rowid[obj_id] = self._rowid_counter
-
         self._rowid_counter += 1
         self.count += 1
 
     def discard(self, obj: _T) -> None:
         obj_id = ido.id_from_obj(obj)
-        rowid = self.rowid_to_items[obj_id]
-        del self.rowid_to_items[rowid]
-        del self.items_to_rowid[obj_id]
+        obj_sto: ObjectStorage = self.all_items.get(obj_id, None)
+        if obj_sto is None:
+            return
+        del self.rowid_to_items[obj_sto.rowid]
 
-        for index, mem in zip(self._iter_indexes(), self.index_memory[obj_id]):
+        for index, mem in zip(self._iter_indexes(), obj_sto.index_mem[obj_id]):
             index.remove(obj, self, mem)
 
-        del self.index_memory[obj_id]
-
+        del obj_sto
         del self.all_items[obj_id]
-        self.all_item_ids.discard(obj_id)
         self.count -= 1
 
     def refresh(self, obj: _T) -> None:
@@ -283,7 +270,8 @@ class Wut(Context[_T], T.MutableSet):
         if obj_id not in self.all_items:
             raise ValueError('item not found')
 
-        old_im = self.index_memory[obj_id]
+        obj_sto: ObjectStorage = self.all_items[obj_id]
+        old_im = obj_sto.index_mem
         new_im_ls = []
 
         for old_v, index in zip(old_im, self._iter_indexes()):
@@ -292,19 +280,15 @@ class Wut(Context[_T], T.MutableSet):
                 index.refresh(obj, self, old_v, new_v)
             new_im_ls.append(new_v)
 
-        self.index_memory[obj_id] = tuple(new_im_ls)
+        obj_sto.index_mem = tuple(new_im_ls)
 
     def clear(self) -> None:
-        self.items_to_rowid.clear()
         self.rowid_to_items.clear()
         self.count = 0
-        self._rowid_counter = 0
 
         for index in self._iter_indexes():
             index.clear()
 
-        self.all_item_ids.clear()
-        self.index_memory.clear()
         self.all_items.clear()
 
     def clone(self, objs: Int64Set | T.Iterable[_T] | None = None) -> T.Self:
@@ -341,7 +325,8 @@ class Wut(Context[_T], T.MutableSet):
             assert isinstance(item, Index)
             assert item.number is not None
             obj_id = ido.id_from_obj(obj)
-            mem = self.index_memory[obj_id]
+            obj_sto: ObjectStorage = self.all_items[obj_id]
+            mem = obj_sto.index_mem
             return mem[item.number]
 
         if isinstance(item, Index):
@@ -356,7 +341,7 @@ class Wut(Context[_T], T.MutableSet):
 
     def get_index_memory(self, obj: _T) -> T.Optional[tuple]:
         obj_id = ido.id_from_obj(obj)
-        return self.index_memory[obj_id]
+        return self.all_items[obj_id].index_mem
 
     def filter(self, condition: T.Union[Condition, str, exp.Expression]) -> Int64Set:
         plan = self.plan(condition)
@@ -389,7 +374,7 @@ class Wut(Context[_T], T.MutableSet):
         return obj_id in self.all_items
 
     def __iter__(self) -> T.Iterator[_T]:
-        return iter(self.all_items.values())
+        return iter(ido.obj_from_id(i) for i in self.all_items)
 
     def __len__(self) -> int:
         return self.count
@@ -418,7 +403,7 @@ class Wut(Context[_T], T.MutableSet):
 
     def objects(self, ids: T.Iterable[int]) -> T.Iterator[_T]:
         for id in ids:
-            yield self.all_items[id]
+            yield ido.obj_from_id(id)
 
     def sorted_objects(
         self, ids: T.Iterable[int], ordering: list[tuple[str, bool]] = None
@@ -431,8 +416,15 @@ class Wut(Context[_T], T.MutableSet):
             for index in indexes:
                 yield index
 
-    def _execute_filter(self, objs: Int64Set, condition: Condition) -> Int64Set:
+    def _execute_filter(self, objs: T.Iterable[int], condition: Condition) -> Int64Set:
         if isinstance(condition, Literal):
+            if not condition.value:
+                return Int64Set()
+            if condition.value:
+                if type(objs) == Int64Set:  # noqa
+                    return objs
+                else:
+                    return Int64Set(objs)
             return objs if condition.value else set()
         return Int64Set(
             filter(lambda o: self.match(condition, ido.obj_from_id(o)), objs)
