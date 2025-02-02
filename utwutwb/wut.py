@@ -307,6 +307,25 @@ class Wut(Context[_T], T.MutableSet):
         self.index_memory.clear()
         self.all_items.clear()
 
+    def clone(self, objs: Int64Set | T.Iterable[_T] | None = None) -> T.Self:
+        o_i: T.Iterable[_T]
+        if objs is None:
+            o_i = []
+        elif type(objs) == Int64Set:  # noqa
+            o_i = self.objects(objs)
+        else:
+            o_i = objs
+
+        return type(self)(
+            objs=o_i,
+            attrs=self.attrs,
+            indexes=[index.clone() for index in self._iter_indexes()],
+            parser=self.parser,
+            planner=self.planner,
+            optimizer=self.optimizer,
+            default_obj=self._default_obj,
+        )
+
     def update(self, objs: T.Iterable[_T]) -> None:
         for obj in objs:
             self.add(obj)
@@ -397,7 +416,13 @@ class Wut(Context[_T], T.MutableSet):
             ),
         )
 
-    def ids_to_objects(self, ids, ordering: list[tuple[str, bool]] = None):
+    def objects(self, ids: T.Iterable[int]) -> T.Iterator[_T]:
+        for id in ids:
+            yield self.all_items[id]
+
+    def sorted_objects(
+        self, ids: T.Iterable[int], ordering: list[tuple[str, bool]] = None
+    ) -> list[_T]:
         ids_sorted = self.sort_ids(ids, ordering)
         return [ido.obj_from_id(id) for id in ids_sorted]
 

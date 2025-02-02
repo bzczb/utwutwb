@@ -59,6 +59,9 @@ class Index(T.Protocol[_T]):
     def clear(self) -> None:
         """Remove all objects from the index"""
 
+    def clone(self) -> T.Self:
+        """Return a copy of the index, with no items added"""
+
     def match(self, condition: 'BinOp', operand: 'Condition') -> 'T.Optional[Plan]':
         """
         Determine if this index can serve the given `condition`.
@@ -211,6 +214,9 @@ class HashIndex(SupportsLookup, Index[_T]):
     def clear(self) -> None:
         self.tree.clear()
         self.none_set.clear()
+
+    def clone(self) -> T.Self:
+        return type(self)(self.params)
 
     def make_val(self, obj: T.Any, ctx) -> None:
         return self._store_val(list(self._extract_val(obj, ctx, False)))
