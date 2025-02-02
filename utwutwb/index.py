@@ -56,6 +56,9 @@ class Index(T.Protocol[_T]):
     ) -> None:
         """Update `obj` in the index"""
 
+    def clear(self) -> None:
+        """Remove all objects from the index"""
+
     def match(self, condition: 'BinOp', operand: 'Condition') -> 'T.Optional[Plan]':
         """
         Determine if this index can serve the given `condition`.
@@ -133,7 +136,7 @@ class HashIndex(SupportsLookup, Index[_T]):
         obj_id = ido.id_from_obj(obj)
         ret_vals = []
         if val is None:
-            val = self._extract_val(obj, ctx)
+            val = self._extract_val(obj, ctx, False)
         else:
             val = self._load_val(val)
         for v in val:
@@ -150,7 +153,7 @@ class HashIndex(SupportsLookup, Index[_T]):
     def remove(self, obj: _T, ctx: 'Context[_T]', val: T.Any = None) -> None:
         obj_id = ido.id_from_obj(obj)
         if val is None:
-            val = self._extract_val(obj, ctx)
+            val = self._extract_val(obj, ctx, True)
         else:
             val = self._load_val(val)
         for v in val:
@@ -173,7 +176,7 @@ class HashIndex(SupportsLookup, Index[_T]):
         old_val = self._load_val(old_val)
         ret_vals = []
         if new_val is None:
-            new_val = [*self._extract_val(obj, ctx)]
+            new_val = [*self._extract_val(obj, ctx, False)]
         else:
             new_val = self._load_val(new_val)
 
@@ -205,8 +208,12 @@ class HashIndex(SupportsLookup, Index[_T]):
 
         return self._store_val(new_val)
 
-    def make_val(self, obj, ctx):
-        return self._store_val(list(self._extract_val(obj, ctx)))
+    def clear(self) -> None:
+        self.tree.clear()
+        self.none_set.clear()
+
+    def make_val(self, obj: T.Any, ctx) -> None:
+        return self._store_val(list(self._extract_val(obj, ctx, False)))
 
     def lookup(self, val: T.Any) -> Int64Set:
         if val is None:
@@ -232,8 +239,10 @@ class HashIndex(SupportsLookup, Index[_T]):
             )
         return None
 
-    def _extract_val(self, obj: _T, ctx: 'Context[_T]') -> T.Iterable[T.Any]:
-        yield ctx.getattr(obj, self.params.name)
+    def _extract_val(
+        self, obj: _T, ctx: 'Context[_T]', memory: bool
+    ) -> T.Iterable[T.Any]:
+        yield ctx.getattr(obj, self, memory)
 
     def _load_val(self, value: T.Any) -> list:
         return [value]
@@ -305,8 +314,10 @@ class InvertedIndex(HashIndex[_T]):
 
     no_none_allowed = True
 
-    def _extract_val(self, obj: _T, ctx: 'Context[_T]') -> T.Iterable[T.Any]:
-        for val in ctx.getattr(obj, self.params.name):
+    def _extract_val(
+        self, obj: _T, ctx: 'Context[_T]', memory: bool
+    ) -> T.Iterable[T.Any]:
+        for val in ctx.getattr(obj, self.params.name, memory):
             # TODO throw if None
             yield val
 

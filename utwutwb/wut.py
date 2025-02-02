@@ -146,7 +146,7 @@ class Wut(Context[_T], T.MutableSet):
     indexes: dict[str, list[Index]] = attr.ib()
     index_nums: dict[str, int] = attr.ib()
 
-    _default_obj: T.Any = attr.ib(default=None)
+    _default_obj: T.Any = attr.ib()
 
     def __init__(
         self,
@@ -157,12 +157,14 @@ class Wut(Context[_T], T.MutableSet):
         parser: Parser | None = None,
         planner: Planner | None = None,
         optimizer: Rule | None = None,
+        default_obj: T.Any = None,
     ):
         self.indexes = {}
         self.attrs = attrs or {}
         self.planner = planner or Planner()
         self.optimizer = optimizer or Chain()
         self.parser = parser or Parser()
+        self._default_obj = default_obj
 
         self.all_items = LOBTree()
         self.all_item_ids = Int64Set()
@@ -231,7 +233,7 @@ class Wut(Context[_T], T.MutableSet):
 
         self.matchers: dict[T.Type[Condition], T.Callable[[Condition, _T], T.Any]] = {
             Literal: lambda condition, obj: condition.value,  # type: ignore
-            Attribute: lambda condition, obj: self.getattr(obj, condition.name),  # type: ignore
+            Attribute: lambda condition, obj: self.getattr(obj, condition.name, False),  # type: ignore
             cond.Array: lambda condition, obj: {
                 self.match(i, obj)
                 for i in condition.items  # type: ignore
@@ -263,16 +265,6 @@ class Wut(Context[_T], T.MutableSet):
 
     def discard(self, obj: _T) -> None:
         obj_id = ido.id_from_obj(obj)
-        if obj_id not in self.all_items:
-            return
-
-        self.remove(obj)
-
-    def remove(self, obj: _T) -> None:
-        obj_id = ido.id_from_obj(obj)
-        if obj_id not in self.all_items:
-            raise ValueError('item not found')
-
         rowid = self.rowid_to_items[obj_id]
         del self.rowid_to_items[rowid]
         del self.items_to_rowid[obj_id]
@@ -302,23 +294,38 @@ class Wut(Context[_T], T.MutableSet):
 
         self.index_memory[obj_id] = tuple(new_im_ls)
 
+    def clear(self) -> None:
+        self.items_to_rowid.clear()
+        self.rowid_to_items.clear()
+        self.count = 0
+        self._rowid_counter = 0
+
+        for index in self._iter_indexes():
+            index.clear()
+
+        self.all_item_ids.clear()
+        self.index_memory.clear()
+        self.all_items.clear()
+
     def update(self, objs: T.Iterable[_T]) -> None:
         for obj in objs:
             self.add(obj)
 
-    def set_default(self, obj: _T) -> None:
+    def set_default_obj(self, obj: _T) -> None:
         self._default_obj = obj
 
     def default_obj(self):
-        raise NotImplementedError
+        raise self._default_obj
 
-    def getattr(self, obj: _T, item: str | Index) -> T.Any:
-        if isinstance(item, Index):
+    def getattr(self, obj: _T, item: str | Index, memory: bool) -> T.Any:
+        if memory:
+            assert isinstance(item, Index)
+            assert item.number is not None
             obj_id = ido.id_from_obj(obj)
             mem = self.index_memory[obj_id]
-            if mem is not None:
-                assert item.number is not None
-                return mem[item.number]
+            return mem[item.number]
+
+        if isinstance(item, Index):
             attr_name = item.params.name
         else:
             attr_name = item
