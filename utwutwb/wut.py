@@ -11,7 +11,6 @@ from cykhash import Int64Set
 from sqlglot import exp
 
 import utwutwb.id_ops as ido
-import utwutwb.set_ops as so
 from utwutwb import condition as cond
 from utwutwb.condition import Attribute, BinOp, Condition, Literal, UnaryOp
 from utwutwb.context import Context
@@ -395,41 +394,6 @@ class Wut(Context[_T], T.MutableSet):
         ids_sorted = self.sort_ids(ids, ordering)
         return [ido.obj_from_id(id) for id in ids_sorted]
 
-    def _store_index_memory(self, obj, im: tuple):
-        self.index_memory[ido.id_from_obj(obj)] = im
-
-    def _del_index_memory(self, obj):
-        del self.index_memory[ido.id_from_obj(obj)]
-
-    @staticmethod
-    def _add_to_storage(storage: IndexStorage, key, value: int):
-        if key is None:
-            storage.none_set.add(value)
-        else:
-            Wut._add_to_tree(storage.tree, key, value)
-
-    @staticmethod
-    def _discard_from_storage(storage: IndexStorage, key, value: int) -> None:
-        if key is None:
-            storage.none_set.discard(value)
-        else:
-            Wut._discard_from_tree(storage.tree, key, value)
-
-    @staticmethod
-    def _add_to_tree(tree: IBTree, key, value: int) -> None:
-        tree[key] = so.add(tree.get(key, None), value)
-
-    @staticmethod
-    def _discard_from_tree(tree: IBTree, key, value: int) -> None:
-        old = tree.get(key, None)
-        if old is None:
-            return
-        new = so.discard(old, value)
-        if new is None:
-            del tree[key]
-        else:
-            tree[key] = new
-
     def _iter_indexes(self) -> T.Iterator[Index]:
         for indexes in self.indexes.values():
             for index in indexes:
@@ -441,12 +405,3 @@ class Wut(Context[_T], T.MutableSet):
         return Int64Set(
             filter(lambda o: self.match(condition, ido.obj_from_id(o)), objs)
         )
-
-    # def _infer_index(self, attr: str) -> Index[_T]:
-    #     obj = next(iter(self.objs))
-    #     value = self.getattr(obj, attr)
-    #     if isinstance(value, (list, tuple, dict, set)):
-    #         return InvertedIndex(attr)
-    #     if isinstance(value, array.array):
-    #         return InvertedArrayIndex(attr)
-    #     return HashIndex(attr)
