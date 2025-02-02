@@ -9,7 +9,6 @@ from BTrees.LLBTree import LLBTree
 from cykhash import Int64Set
 from sqlglot import exp
 
-import utwutwb.id_ops as ido
 from utwutwb import condition as cond
 from utwutwb.condition import Attribute, BinOp, Condition, Literal, UnaryOp
 from utwutwb.context import Context
@@ -237,7 +236,7 @@ class Wut(Context[_PK, _OBJ], T.MutableSet):
         }
 
     def add(self, obj: _OBJ) -> None:
-        obj_id = ido.id_from_obj(obj)
+        obj_id = id(obj)
         if obj_id in self.id_to_rowid:
             return
         obj_sto = self.store.set(self._rowid_counter, obj)
@@ -252,7 +251,7 @@ class Wut(Context[_PK, _OBJ], T.MutableSet):
         self.count += 1
 
     def discard(self, obj: _OBJ) -> None:
-        obj_id = ido.id_from_obj(obj)
+        obj_id = id(obj)
         row_id = self.id_to_rowid.get(obj_id, None)
         if row_id is None:
             return
@@ -272,7 +271,7 @@ class Wut(Context[_PK, _OBJ], T.MutableSet):
         self.count -= 1
 
     def refresh(self, obj: _OBJ) -> None:
-        obj_id = ido.id_from_obj(obj)
+        obj_id = id(obj)
         row_id = self.id_to_rowid.get(obj_id, None)
         if row_id not in self.store:
             raise ValueError('item not found')
@@ -350,7 +349,7 @@ class Wut(Context[_PK, _OBJ], T.MutableSet):
             return getattr(obj.obj, attr_name)
 
     def get_index_memory(self, obj: _OBJ) -> T.Optional[tuple]:
-        obj_id = ido.id_from_obj(obj)
+        obj_id = id(obj)
         return self.store[obj_id].index_mem
 
     def filter(self, condition: T.Union[Condition, str, exp.Expression]) -> Int64Set:
@@ -380,7 +379,7 @@ class Wut(Context[_PK, _OBJ], T.MutableSet):
         raise ValueError(f'Unsupported condition: {condition}')
 
     def __contains__(self, obj: object) -> bool:
-        obj_id = ido.id_from_obj(obj)
+        obj_id = id(obj)
         return obj_id in self.id_to_rowid
 
     def __iter__(self) -> T.Iterator[_OBJ]:
