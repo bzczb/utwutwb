@@ -44,7 +44,8 @@ class ObjectStorage(T.Generic[_T]):
 
 
 class WutSortKey:
-    __slots__ = ('obj_sto', 'ordering', 'rowid_desc')
+    # TODO broken
+    __slots__ = ('wut', 'obj_sto', 'ordering', 'rowid_desc')
 
     def __init__(
         self,
@@ -53,6 +54,7 @@ class WutSortKey:
         rowid_desc: bool,
         id_: int,
     ):
+        self.wut = wut
         self.obj_sto: ObjectStorage = wut.all_items[id_]
         self.ordering = ordering
         self.rowid_desc = rowid_desc
@@ -139,6 +141,9 @@ class Wut(Context[_T], T.MutableSet):
     attrs: ComputedAttrs = attr.ib()
     indexes: dict[str, list[Index]] = attr.ib()
     index_nums: dict[str, int] = attr.ib()
+    """all indexes"""
+    index_mem_nums: dict[str, int] = attr.ib()
+    """indexes that are memorized"""
 
     _default_obj: T.Any = attr.ib()
 
@@ -175,11 +180,18 @@ class Wut(Context[_T], T.MutableSet):
                 index = ip
             self.indexes.setdefault(index.params.name, []).append(index)
 
-        self.index_nums = {}
-        for i, index in enumerate(self._iter_indexes()):
+        index_num, index_mem_num = 0, 0
+        self.index_nums, self.index_mem_nums = {}, {}
+        for index in self._iter_indexes():
             assert index.number is None
-            index.number = i
-            self.index_nums[index.params.name] = i
+            index.number = index_num
+            self.index_nums[index.params.name] = index_num
+            index_num += 1
+
+            if index.params.memorize:
+                index.mem_number = index_mem_num
+                self.index_mem_nums[index.params.name] = index_mem_num
+                index_mem_num += 1
 
         if objs is not None:
             self.update(objs)
@@ -244,7 +256,8 @@ class Wut(Context[_T], T.MutableSet):
         im_ls = []
         for index in self._iter_indexes():
             val = index.add(obj, self)
-            im_ls.append(val)
+            if index.params.memorize:
+                im_ls.append(val)
 
         obj_sto.index_mem = tuple(im_ls)
         self.rowid_to_items[self._rowid_counter] = obj_id
@@ -257,11 +270,15 @@ class Wut(Context[_T], T.MutableSet):
         if obj_sto is None:
             return
         del self.rowid_to_items[obj_sto.rowid]
+        index_mem = iter(obj_sto.index_mem)
 
-        for index, mem in zip(self._iter_indexes(), obj_sto.index_mem[obj_id]):
-            index.remove(obj, self, mem)
+        for index in self._iter_indexes():
+            if index.params.memorize:
+                mem = next(index_mem)
+                index.remove(obj, self, mem)
+            else:
+                index.remove(obj, self)
 
-        del obj_sto
         del self.all_items[obj_id]
         self.count -= 1
 
@@ -271,10 +288,14 @@ class Wut(Context[_T], T.MutableSet):
             raise ValueError('item not found')
 
         obj_sto: ObjectStorage = self.all_items[obj_id]
-        old_im = obj_sto.index_mem
+        old_im = iter(obj_sto.index_mem)
         new_im_ls = []
 
-        for old_v, index in zip(old_im, self._iter_indexes()):
+        for index in self._iter_indexes():
+            if not index.params.memorize:
+                # index not memorized, so it must be constant
+                continue
+            old_v = next(old_im)
             new_v = index.make_val(obj, self)
             if old_v != new_v:
                 index.refresh(obj, self, old_v, new_v)
@@ -323,11 +344,12 @@ class Wut(Context[_T], T.MutableSet):
     def getattr(self, obj: _T, item: str | Index, memory: bool) -> T.Any:
         if memory:
             assert isinstance(item, Index)
-            assert item.number is not None
-            obj_id = ido.id_from_obj(obj)
-            obj_sto: ObjectStorage = self.all_items[obj_id]
-            mem = obj_sto.index_mem
-            return mem[item.number]
+            index = item
+            if index.params.memorize:
+                assert index.mem_number is not None
+                obj_id = ido.id_from_obj(obj)
+                obj_sto: ObjectStorage = self.all_items[obj_id]
+                return obj_sto.index_mem[index.mem_number]
 
         if isinstance(item, Index):
             attr_name = item.params.name
@@ -380,6 +402,10 @@ class Wut(Context[_T], T.MutableSet):
         return self.count
 
     def sort_ids(self, ids: T.Iterable[int], ordering: list[tuple[str, bool]] = None):
+        # TODO broken
+        if ordering:
+            assert False, 'broken rn'
+
         if ordering is None:
             ordering = []
         order_index_n: list[tuple[int, bool]] = []
@@ -411,10 +437,11 @@ class Wut(Context[_T], T.MutableSet):
         ids_sorted = self.sort_ids(ids, ordering)
         return [ido.obj_from_id(id) for id in ids_sorted]
 
-    def _iter_indexes(self) -> T.Iterator[Index]:
+    def _iter_indexes(self, *, memorized_only=False) -> T.Iterator[Index]:
         for indexes in self.indexes.values():
             for index in indexes:
-                yield index
+                if not memorized_only or index.params.memorize:
+                    yield index
 
     def _execute_filter(self, objs: T.Iterable[int], condition: Condition) -> Int64Set:
         if isinstance(condition, Literal):

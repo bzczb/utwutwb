@@ -25,7 +25,13 @@ class IndexParams:
     name: str = attr.ib()
     key_type: T.Literal['obj', 'int', 'uint'] = attr.ib(default='obj')
     none_allowed: bool = attr.ib(default=False, kw_only=True)
+    """allow None as a key"""
     unique: bool = attr.ib(default=False, kw_only=True)
+    """only allow one object per key"""
+    memorize: bool = attr.ib(default=True, kw_only=True)
+    """keep a copy of this index's value; use if the object can mutate or if
+    the value is particularly expensive to compute
+    """
 
     mode: T.Literal['direct', 'computed'] = attr.ib(init=False)
 
@@ -43,6 +49,7 @@ class IndexParams:
 class Index(T.Protocol[_T]):
     params: IndexParams
     number: int | None
+    mem_number: int | None
 
     def add(self, obj: _T, ctx: 'Context[_T]', val: T.Any = None) -> T.Any:
         """
@@ -136,6 +143,7 @@ class HashIndex(SupportsLookup, Index[_T]):
         if self.NONE_ALLOWED and self.params.none_allowed:
             self.__none_set = Int64Set()
         self.number = None
+        self.mem_number = None
 
     def add(self, obj: _T, ctx: 'Context[_T]', val: T.Any = None) -> list:
         obj_id = ido.id_from_obj(obj)
@@ -181,6 +189,7 @@ class HashIndex(SupportsLookup, Index[_T]):
     def refresh(
         self, obj: _T, ctx: 'Context[_T]', old_val: T.Any, new_val: T.Any = None
     ) -> None:
+        assert self.params.memorize
         obj_id = ido.id_from_obj(obj)
         old_val = self._load_val(old_val)
         if new_val is None:
