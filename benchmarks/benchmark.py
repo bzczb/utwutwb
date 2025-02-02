@@ -57,13 +57,11 @@ def lookup(objs):
 
     plan = iset.optimize(iset.plan(q))
 
-    preplanned_result = []
-    preplanned_measure = measure(lambda: preplanned_result.append(iset.execute(plan)))
-
     return {
-        'utwutwb IndexedSet': measure(lambda: iset.filter(q)),
-        'utwutwb IndexedSet (pre-planned)': preplanned_measure,
-        'utwutwb objects out': measure(lambda: iset.list_objects(preplanned_result[0])),
+        'utwutwb IndexedSet': measure(lambda: iset.list_objects(iset.filter(q))),
+        'utwutwb IndexedSet (pre-planned)': measure(
+            lambda: iset.list_objects(iset.execute(plan))
+        ),
         'ducks Dex': measure(lambda: set(dex[ducks_q])),
         'ducks FrozenDex': measure(lambda: set(fdex[ducks_q])),
         'sqlite': measure(
@@ -122,13 +120,11 @@ def range_lookup(objs, start, stop):
 
     plan = iset.optimize(iset.plan(q))
 
-    preplanned_result = []
-    preplanned_measure = measure(lambda: preplanned_result.append(iset.execute(plan)))
-
     return {
-        'utwutwb IndexedSet': measure(lambda: iset.filter(q)),
-        'utwutwb IndexedSet (pre-planned)': preplanned_measure,
-        'utwutwb objects out': measure(lambda: iset.list_objects(preplanned_result[0])),
+        'utwutwb IndexedSet': measure(lambda: iset.list_objects(iset.filter(q))),
+        'utwutwb IndexedSet (pre-planned)': measure(
+            lambda: iset.list_objects(iset.execute(plan))
+        ),
         'ducks Dex': measure(lambda: set(dex[ducks_q])),
         'ducks FrozenDex': measure(lambda: set(fdex[ducks_q])),
         'sqlite': measure(

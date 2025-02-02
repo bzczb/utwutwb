@@ -2,16 +2,20 @@ import typing as T
 
 if T.TYPE_CHECKING:
     from utwutwb.index import Index
+    from utwutwb.store import ObjectStorage
 
-_T = T.TypeVar('_T')
+_OBJ = T.TypeVar('_OBJ')
+_PK = T.TypeVar('_PK')
 
 
-class Context(T.Generic[_T]):
+class Context(T.Generic[_PK, _OBJ]):
     indexes: 'dict[str, list[Index]]'
-    objs: set[_T]
-    attrs: dict[str, T.Callable[[_T], T.Any]]
+    objs: set[_OBJ]
+    attrs: dict[str, T.Callable[[_OBJ], T.Any]]
 
-    def getattr(self, obj: _T, item: 'str | Index', memory: bool) -> T.Any: ...
+    def getattr(
+        self, obj: 'ObjectStorage[_PK, _OBJ]', item: 'str | Index', memory: bool
+    ) -> T.Any: ...
 
-    def get_index_memory(self, obj: _T) -> T.Optional[tuple]:
+    def get_index_memory(self, obj: _OBJ) -> T.Optional[tuple]:
         return None

@@ -6,7 +6,6 @@ from functools import partial
 import attr
 from BTrees.Interfaces import IBTree
 from BTrees.LLBTree import LLBTree
-from BTrees.LOBTree import LOBTree
 from cykhash import Int64Set
 from sqlglot import exp
 
@@ -28,19 +27,14 @@ from utwutwb.plan import (
     ScanFilter,
     Union,
 )
+from utwutwb.store import ListStore, ObjectStorage, Store
 
 ADDRESS_SIZE = struct.calcsize('P')
 assert ADDRESS_SIZE == 8, '64-bit address size required'
 
 
-_T = T.TypeVar('_T')
-
-
-@attr.s(slots=True)
-class ObjectStorage(T.Generic[_T]):
-    obj: _T = attr.ib()
-    rowid: int = attr.ib()
-    index_mem: tuple = attr.ib(init=False)
+_OBJ = T.TypeVar('_OBJ')
+_PK = T.TypeVar('_PK')
 
 
 class WutSortKey:
@@ -55,7 +49,7 @@ class WutSortKey:
         id_: int,
     ):
         self.wut = wut
-        self.obj_sto: ObjectStorage = wut.all_items[id_]
+        self.obj_sto: ObjectStorage = wut.store[id_]
         self.ordering = ordering
         self.rowid_desc = rowid_desc
 
@@ -66,10 +60,10 @@ class WutSortKey:
                 return not descending
             if sm > om:
                 return descending
-        return (self.obj_sto.rowid < other.obj_sto.rowid) != self.rowid_desc
+        return (self.obj_sto.pk < other.obj_sto.pk) != self.rowid_desc
 
 
-ComputedAttrs = dict[str, T.Callable[[_T], T.Any]]
+ComputedAttrs = dict[str, T.Callable[[_OBJ], T.Any]]
 
 
 def int64set_intersection(*sets):
@@ -89,7 +83,7 @@ def int64set_union(*sets):
 
 
 @attr.s(init=False, cmp=False)
-class Wut(Context[_T], T.MutableSet):
+class Wut(Context[_PK, _OBJ], T.MutableSet):
     BINOPS = {
         cond.Add: operator.add,
         cond.Div: operator.truediv,
@@ -119,14 +113,8 @@ class Wut(Context[_T], T.MutableSet):
         cond.Invert: operator.invert,
     }
 
-    all_items: IBTree = attr.ib()
-    """
-    map of item id to ObjectStorage
-    keep items around so they don't get deleted;
-    other than that we cast id directly to item
-    """
-    rowid_to_items: IBTree = attr.ib()
-    """map of row id to item id"""
+    store: Store = attr.ib()
+    id_to_rowid: IBTree = attr.ib()
 
     count: int = attr.ib()
     """number of items"""
@@ -149,26 +137,27 @@ class Wut(Context[_T], T.MutableSet):
 
     def __init__(
         self,
-        objs: T.Iterable[_T] = None,
+        objs: T.Iterable[_OBJ] = None,
         *,
         attrs: ComputedAttrs = None,
         indexes: T.Sequence[Index | IndexParams | str] = None,
         parser: Parser | None = None,
         planner: Planner | None = None,
         optimizer: Rule | None = None,
+        store: Store | None = None,
         default_obj: T.Any = None,
     ):
         self.indexes = {}
         self.attrs = attrs or {}
+        self.parser = parser or Parser()
         self.planner = planner or Planner()
         self.optimizer = optimizer or Chain()
-        self.parser = parser or Parser()
+        self.store = store or ListStore()  # BTreeStore()
         self._default_obj = default_obj
 
-        self.all_items = LOBTree()
-        self.rowid_to_items = LLBTree()
         self.count = 0
         self._rowid_counter = 0
+        self.id_to_rowid = LLBTree()
 
         indexes = indexes or []
         for ip in indexes:
@@ -198,7 +187,7 @@ class Wut(Context[_T], T.MutableSet):
 
         self.executors: dict[T.Type[Plan], T.Callable[[Plan], Int64Set]] = {
             ScanFilter: lambda plan: self._execute_filter(
-                self.all_items,
+                self.store.keys(),
                 plan.condition,  # type: ignore
             ),
             Filter: lambda plan: self._execute_filter(
@@ -218,8 +207,8 @@ class Wut(Context[_T], T.MutableSet):
 
         def match_binop(
             op: T.Callable[[T.Any, T.Any], T.Any],
-        ) -> T.Callable[[BinOp, _T], T.Any]:
-            def matcher(condition: BinOp, obj: _T) -> T.Any:
+        ) -> T.Callable[[BinOp, ObjectStorage[_PK, _OBJ]], T.Any]:
+            def matcher(condition: BinOp, obj: ObjectStorage[_PK, _OBJ]) -> T.Any:
                 return op(
                     self.match(condition.left, obj), self.match(condition.right, obj)
                 )
@@ -228,13 +217,15 @@ class Wut(Context[_T], T.MutableSet):
 
         def match_unaryop(
             op: T.Callable[[T.Any], T.Any],
-        ) -> T.Callable[[UnaryOp, _T], T.Any]:
-            def matcher(condition: UnaryOp, obj: _T) -> T.Any:
+        ) -> T.Callable[[UnaryOp, ObjectStorage[_PK, _OBJ]], T.Any]:
+            def matcher(condition: UnaryOp, obj: ObjectStorage[_PK, _OBJ]) -> T.Any:
                 return op(self.match(condition.operand, obj))
 
             return matcher
 
-        self.matchers: dict[T.Type[Condition], T.Callable[[Condition, _T], T.Any]] = {
+        self.matchers: dict[
+            T.Type[Condition], T.Callable[[Condition, ObjectStorage[_PK, _OBJ]], T.Any]
+        ] = {
             Literal: lambda condition, obj: condition.value,  # type: ignore
             Attribute: lambda condition, obj: self.getattr(obj, condition.name, False),  # type: ignore
             cond.Array: lambda condition, obj: {
@@ -245,49 +236,48 @@ class Wut(Context[_T], T.MutableSet):
             **{klass: match_unaryop(op) for klass, op in self.UNARY_OPS.items()},  # type: ignore
         }
 
-    def add(self, obj: _T) -> None:
+    def add(self, obj: _OBJ) -> None:
         obj_id = ido.id_from_obj(obj)
-        if obj_id in self.all_items:
+        if obj_id in self.id_to_rowid:
             return
-
-        obj_sto = ObjectStorage(obj, self._rowid_counter)
-        self.all_items[obj_id] = obj_sto
-
+        obj_sto = self.store.set(self._rowid_counter, obj)
         im_ls = []
         for index in self._iter_indexes():
-            val = index.add(obj, self)
+            val = index.add(obj_sto, self)
             if index.params.memorize:
                 im_ls.append(val)
-
         obj_sto.index_mem = tuple(im_ls)
-        self.rowid_to_items[self._rowid_counter] = obj_id
+        self.id_to_rowid[obj_id] = self._rowid_counter
         self._rowid_counter += 1
         self.count += 1
 
-    def discard(self, obj: _T) -> None:
+    def discard(self, obj: _OBJ) -> None:
         obj_id = ido.id_from_obj(obj)
-        obj_sto: ObjectStorage = self.all_items.get(obj_id, None)
-        if obj_sto is None:
+        row_id = self.id_to_rowid.get(obj_id, None)
+        if row_id is None:
             return
-        del self.rowid_to_items[obj_sto.rowid]
+        obj_sto = self.store.get(obj_id)
+        assert obj_sto is not None
+        del self.id_to_rowid[obj_id]
         index_mem = iter(obj_sto.index_mem)
 
         for index in self._iter_indexes():
             if index.params.memorize:
                 mem = next(index_mem)
-                index.remove(obj, self, mem)
+                index.remove(obj_sto, self, mem)
             else:
-                index.remove(obj, self)
+                index.remove(obj_sto, self)
 
-        del self.all_items[obj_id]
+        self.store.delete(row_id)
         self.count -= 1
 
-    def refresh(self, obj: _T) -> None:
+    def refresh(self, obj: _OBJ) -> None:
         obj_id = ido.id_from_obj(obj)
-        if obj_id not in self.all_items:
+        row_id = self.id_to_rowid.get(obj_id, None)
+        if row_id not in self.store:
             raise ValueError('item not found')
 
-        obj_sto: ObjectStorage = self.all_items[obj_id]
+        obj_sto = self.store[obj_id]
         old_im = iter(obj_sto.index_mem)
         new_im_ls = []
 
@@ -296,24 +286,22 @@ class Wut(Context[_T], T.MutableSet):
                 # index not memorized, so it must be constant
                 continue
             old_v = next(old_im)
-            new_v = index.make_val(obj, self)
+            new_v = index.make_val(obj_sto, self)
             if old_v != new_v:
-                index.refresh(obj, self, old_v, new_v)
+                index.refresh(obj_sto, self, old_v, new_v)
             new_im_ls.append(new_v)
 
         obj_sto.index_mem = tuple(new_im_ls)
 
     def clear(self) -> None:
-        self.rowid_to_items.clear()
+        self.id_to_rowid.clear()
         self.count = 0
-
         for index in self._iter_indexes():
             index.clear()
+        self.store.clear()
 
-        self.all_items.clear()
-
-    def clone(self, objs: Int64Set | T.Iterable[_T] | None = None) -> T.Self:
-        o_i: T.Iterable[_T]
+    def clone(self, objs: Int64Set | T.Iterable[_OBJ] | None = None) -> T.Self:
+        o_i: T.Iterable[_OBJ]
         if objs is None:
             o_i = []
         elif type(objs) == Int64Set:  # noqa
@@ -331,25 +319,25 @@ class Wut(Context[_T], T.MutableSet):
             default_obj=self._default_obj,
         )
 
-    def update(self, objs: T.Iterable[_T]) -> None:
+    def update(self, objs: T.Iterable[_OBJ]) -> None:
         for obj in objs:
             self.add(obj)
 
-    def set_default_obj(self, obj: _T) -> None:
+    def set_default_obj(self, obj: _OBJ) -> None:
         self._default_obj = obj
 
     def default_obj(self):
         raise self._default_obj
 
-    def getattr(self, obj: _T, item: str | Index, memory: bool) -> T.Any:
+    def getattr(
+        self, obj: 'ObjectStorage[_PK, _OBJ]', item: str | Index, memory: bool
+    ) -> T.Any:
         if memory:
             assert isinstance(item, Index)
             index = item
             if index.params.memorize:
                 assert index.mem_number is not None
-                obj_id = ido.id_from_obj(obj)
-                obj_sto: ObjectStorage = self.all_items[obj_id]
-                return obj_sto.index_mem[index.mem_number]
+                return obj.index_mem[index.mem_number]
 
         if isinstance(item, Index):
             attr_name = item.params.name
@@ -357,13 +345,13 @@ class Wut(Context[_T], T.MutableSet):
             attr_name = item
 
         if attr_name.startswith('`'):
-            return self.attrs[attr_name](obj)
+            return self.attrs[attr_name](obj.obj)
         else:
-            return getattr(obj, attr_name)
+            return getattr(obj.obj, attr_name)
 
-    def get_index_memory(self, obj: _T) -> T.Optional[tuple]:
+    def get_index_memory(self, obj: _OBJ) -> T.Optional[tuple]:
         obj_id = ido.id_from_obj(obj)
-        return self.all_items[obj_id].index_mem
+        return self.store[obj_id].index_mem
 
     def filter(self, condition: T.Union[Condition, str, exp.Expression]) -> Int64Set:
         plan = self.plan(condition)
@@ -384,7 +372,7 @@ class Wut(Context[_T], T.MutableSet):
             return executor(plan)
         raise ValueError(f'Unsupported plan: {plan}')
 
-    def match(self, condition: Condition, obj: _T) -> T.Any:
+    def match(self, condition: Condition, obj: ObjectStorage[_PK, _OBJ]) -> T.Any:
         matcher = self.matchers.get(condition.__class__)
         if matcher:
             return matcher(condition, obj)
@@ -393,10 +381,11 @@ class Wut(Context[_T], T.MutableSet):
 
     def __contains__(self, obj: object) -> bool:
         obj_id = ido.id_from_obj(obj)
-        return obj_id in self.all_items
+        return obj_id in self.id_to_rowid
 
-    def __iter__(self) -> T.Iterator[_T]:
-        return iter(ido.obj_from_id(i) for i in self.all_items)
+    def __iter__(self) -> T.Iterator[_OBJ]:
+        for obj_sto in self.store.values():
+            yield obj_sto.obj
 
     def __len__(self) -> int:
         return self.count
@@ -427,17 +416,17 @@ class Wut(Context[_T], T.MutableSet):
             ),
         )
 
-    def objects(self, ids: T.Iterable[int]) -> T.Iterator[_T]:
+    def objects(self, ids: T.Iterable[int]) -> T.Iterator[_OBJ]:
         for id in ids:
-            yield ido.obj_from_id(id)
+            yield self.store[id].obj
 
     def sorted_objects(
         self, ids: T.Iterable[int], ordering: list[tuple[str, bool]] = None
-    ) -> list[_T]:
+    ) -> list[_OBJ]:
         ids_sorted = self.sort_ids(ids, ordering)
-        return [ido.obj_from_id(id) for id in ids_sorted]
+        return [self.store[id].obj for id in ids_sorted]
 
-    def list_objects(self, ids: T.Iterable[int]) -> list[_T]:
+    def list_objects(self, ids: T.Iterable[int]) -> list[_OBJ]:
         return list(self.objects(ids))
 
     def _iter_indexes(self, *, memorized_only=False) -> T.Iterator[Index]:
@@ -456,6 +445,4 @@ class Wut(Context[_T], T.MutableSet):
                 else:
                     return Int64Set(objs)
             return objs if condition.value else set()
-        return Int64Set(
-            filter(lambda o: self.match(condition, ido.obj_from_id(o)), objs)
-        )
+        return Int64Set(filter(lambda o: self.match(condition, self.store[o]), objs))

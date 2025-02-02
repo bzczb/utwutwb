@@ -7,7 +7,6 @@ from BTrees.OOBTree import OOBTree
 from BTrees.QOBTree import QOBTree
 from cykhash import Int64Set
 
-import utwutwb.id_ops as ido
 import utwutwb.set_ops as so
 from utwutwb.condition import Array, BinOp, Condition, Eq, Ge, Gt, In, Le, Literal, Lt
 from utwutwb.constants import ARR_TYPE
@@ -15,8 +14,10 @@ from utwutwb.plan import Bound, IndexLookup, IndexRange, Plan, Range, Union, Uns
 
 if T.TYPE_CHECKING:
     from utwutwb.context import Context
+    from utwutwb.store import ObjectStorage
 
-_T = T.TypeVar('_T')
+_OBJ = T.TypeVar('_OBJ')
+_PK = T.TypeVar('_PK')
 IndexBTrees = {'obj': OOBTree, 'int': LOBTree, 'uint': QOBTree}
 
 
@@ -46,22 +47,36 @@ class IndexParams:
 
 
 @T.runtime_checkable
-class Index(T.Protocol[_T]):
+class Index(T.Protocol[_PK, _OBJ]):
     params: IndexParams
     number: int | None
     mem_number: int | None
 
-    def add(self, obj: _T, ctx: 'Context[_T]', val: T.Any = None) -> T.Any:
+    def add(
+        self,
+        obj: 'ObjectStorage[_PK, _OBJ]',
+        ctx: 'Context[_PK, _OBJ]',
+        val: T.Any = None,
+    ) -> T.Any:
         """
         Add `obj` to the index
         Returns a storable version of the vals.
         """
 
-    def remove(self, obj: _T, ctx: 'Context[_T]', val: T.Any = None) -> None:
+    def remove(
+        self,
+        obj: 'ObjectStorage[_PK, _OBJ]',
+        ctx: 'Context[_PK, _OBJ]',
+        val: T.Any = None,
+    ) -> None:
         """Remove `obj` from the index"""
 
     def refresh(
-        self, obj: _T, ctx: 'Context[_T]', old_val: T.Any, new_val: T.Any = None
+        self,
+        obj: 'ObjectStorage[_PK, _OBJ]',
+        ctx: 'Context[_PK, _OBJ]',
+        old_val: T.Any,
+        new_val: T.Any = None,
     ) -> None:
         """Update `obj` in the index"""
 
@@ -85,7 +100,11 @@ class Index(T.Protocol[_T]):
             `IndexLoop` plan if it can.
         """
 
-    def make_val(self, obj: _T, ctx: 'Context[_T]') -> T.Any:
+    def make_val(
+        self,
+        obj: 'ObjectStorage[_PK, _OBJ]',
+        ctx: 'Context[_PK, _OBJ]',
+    ) -> T.Any:
         """
         Make a storable version of the attribute value for the given object
         """
@@ -121,7 +140,7 @@ class SupportsRange(T.Protocol):
         """
 
 
-class HashIndex(SupportsLookup, Index[_T]):
+class HashIndex(SupportsLookup, Index[int, _OBJ]):
     """
     Hash table index.
 
@@ -145,8 +164,12 @@ class HashIndex(SupportsLookup, Index[_T]):
         self.number = None
         self.mem_number = None
 
-    def add(self, obj: _T, ctx: 'Context[_T]', val: T.Any = None) -> list:
-        obj_id = ido.id_from_obj(obj)
+    def add(
+        self,
+        obj: 'ObjectStorage[int, _OBJ]',
+        ctx: 'Context[int, _OBJ]',
+        val: T.Any = None,
+    ) -> list:
         ret_vals = []
         if val is None:
             val = self._extract_val(obj, ctx, False)
@@ -154,43 +177,50 @@ class HashIndex(SupportsLookup, Index[_T]):
             val = self._load_val(val)
         for v in val:
             if v is None:
-                self.__none_set.add(obj_id)
+                self.__none_set.add(obj.pk)
             else:
                 dest_set = self.tree.get(v, None)
                 if dest_set is not None and self.params.unique:
                     raise ValueError(
                         f'Unique constraint violation when adding object "{obj}": index "{self}"  already has value "{v}"'
                     )
-                dest_set2 = so.add(dest_set, obj_id)
+                dest_set2 = so.add(dest_set, obj.pk)
                 if dest_set is not dest_set2:
                     self.tree[v] = dest_set2
             ret_vals.append(v)
         return self._store_val(ret_vals)
 
-    def remove(self, obj: _T, ctx: 'Context[_T]', val: T.Any = None) -> None:
-        obj_id = ido.id_from_obj(obj)
+    def remove(
+        self,
+        obj: 'ObjectStorage[int, _OBJ]',
+        ctx: 'Context[int, _OBJ]',
+        val: T.Any = None,
+    ) -> None:
         if val is None:
             val = self._extract_val(obj, ctx, True)
         else:
             val = self._load_val(val)
         for v in val:
             if v is None:
-                self.__none_set.discard(obj_id)
+                self.__none_set.discard(obj.pk)
             else:
                 dest_set = self.tree.get(v, None)
                 if dest_set is None:
                     continue
-                dest_set2 = so.discard(dest_set, obj_id)
+                dest_set2 = so.discard(dest_set, obj.pk)
                 if dest_set2 is None:
                     del self.tree[v]
                 elif dest_set is not dest_set2:
                     self.tree[v] = dest_set2
 
     def refresh(
-        self, obj: _T, ctx: 'Context[_T]', old_val: T.Any, new_val: T.Any = None
+        self,
+        obj: 'ObjectStorage[int, _OBJ]',
+        ctx: 'Context[int, _OBJ]',
+        old_val: T.Any,
+        new_val: T.Any = None,
     ) -> None:
         assert self.params.memorize
-        obj_id = ido.id_from_obj(obj)
         old_val = self._load_val(old_val)
         if new_val is None:
             new_val = [*self._extract_val(obj, ctx, False)]
@@ -203,12 +233,12 @@ class HashIndex(SupportsLookup, Index[_T]):
 
         for v in removed_s:
             if v is None:
-                self.__none_set.discard(obj_id)
+                self.__none_set.discard(obj.pk)
                 continue
             dest_set = self.tree.get(v, None)
             if dest_set is None:
                 continue
-            dest_set2 = so.discard(dest_set, obj_id)
+            dest_set2 = so.discard(dest_set, obj.pk)
             if dest_set2 is None:
                 del self.tree[v]
             elif dest_set is not dest_set2:
@@ -216,14 +246,14 @@ class HashIndex(SupportsLookup, Index[_T]):
 
         for v in added_s:
             if v is None:
-                self.__none_set.add(obj_id)
+                self.__none_set.add(obj.pk)
             else:
                 dest_set = self.tree.get(v, None)
                 if dest_set is not None and self.params.unique:
                     raise ValueError(
                         f'Unique constraint violation when refreshing object "{obj}": index "{self}" already has value "{v}"'
                     )
-                dest_set2 = so.add(dest_set, obj_id)
+                dest_set2 = so.add(dest_set, obj.pk)
                 if dest_set is not dest_set2:
                     self.tree[v] = dest_set2
 
@@ -272,7 +302,10 @@ class HashIndex(SupportsLookup, Index[_T]):
         return None
 
     def _extract_val(
-        self, obj: _T, ctx: 'Context[_T]', memory: bool
+        self,
+        obj: 'ObjectStorage[int, _OBJ]',
+        ctx: 'Context[int, _OBJ]',
+        memory: bool,
     ) -> T.Iterable[T.Any]:
         yield ctx.getattr(obj, self, memory)
 
@@ -287,7 +320,7 @@ class HashIndex(SupportsLookup, Index[_T]):
         return f'{self.__class__.__name__}({self.params.name})'
 
 
-class RangeIndex(SupportsRange, HashIndex[_T]):
+class RangeIndex(SupportsRange, HashIndex[_OBJ]):
     INVERSE_COMPARISONS: dict[T.Type[BinOp], T.Type[BinOp]] = {
         Lt: Gt,
         Gt: Lt,
@@ -337,7 +370,7 @@ class RangeIndex(SupportsRange, HashIndex[_T]):
         return super().match(condition, operand)
 
 
-class InvertedIndex(HashIndex[_T]):
+class InvertedIndex(HashIndex[_OBJ]):
     """
     Same as a `HashIndex`, except this assumes the attribute is a collection of values.
 
@@ -347,7 +380,10 @@ class InvertedIndex(HashIndex[_T]):
     NONE_ALLOWED = False
 
     def _extract_val(
-        self, obj: _T, ctx: 'Context[_T]', memory: bool
+        self,
+        obj: 'ObjectStorage[int, _OBJ]',
+        ctx: 'Context[int, _OBJ]',
+        memory: bool,
     ) -> T.Iterable[T.Any]:
         for val in ctx.getattr(obj, self.params.name, memory):
             # TODO throw if None
@@ -369,6 +405,6 @@ class InvertedIndex(HashIndex[_T]):
         return list(value)
 
 
-class InvertedArrayIndex(InvertedIndex[_T]):
+class InvertedArrayIndex(InvertedIndex[_OBJ]):
     def _store_val(self, value: list) -> array.array:
         return array.array(ARR_TYPE, value)
