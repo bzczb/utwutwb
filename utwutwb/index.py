@@ -24,6 +24,8 @@ IndexBTrees = {'obj': OOBTree, 'int': LOBTree, 'uint': QOBTree}
 class IndexParams:
     name: str = attr.ib()
     key_type: T.Literal['obj', 'int', 'uint'] = attr.ib(default='obj')
+    none_allowed: bool = attr.ib(default=False, kw_only=True)
+    unique: bool = attr.ib(default=False, kw_only=True)
 
     mode: T.Literal['direct', 'computed'] = attr.ib(init=False)
 
@@ -125,14 +127,14 @@ class HashIndex(SupportsLookup, Index[_T]):
     """
 
     tree: T.Any  # really btree
-    none_set: Int64Set
-    no_none_allowed: T.ClassVar[bool] = False
+    __none_set: Int64Set
+    NONE_ALLOWED: T.ClassVar[bool] = True
 
     def __init__(self, attr: str | IndexParams):
         self.params = attr if isinstance(attr, IndexParams) else IndexParams(attr)
         self.tree = self.params.make_btree()
-        if not self.no_none_allowed:
-            self.none_set = Int64Set()
+        if self.NONE_ALLOWED and self.params.none_allowed:
+            self.__none_set = Int64Set()
         self.number = None
 
     def add(self, obj: _T, ctx: 'Context[_T]', val: T.Any = None) -> list:
@@ -144,9 +146,13 @@ class HashIndex(SupportsLookup, Index[_T]):
             val = self._load_val(val)
         for v in val:
             if v is None:
-                self.none_set.add(obj_id)
+                self.__none_set.add(obj_id)
             else:
                 dest_set = self.tree.get(v, None)
+                if dest_set is not None and self.params.unique:
+                    raise ValueError(
+                        f'Unique constraint violation when adding object "{obj}": index "{self}"  already has value "{v}"'
+                    )
                 dest_set2 = so.add(dest_set, obj_id)
                 if dest_set is not dest_set2:
                     self.tree[v] = dest_set2
@@ -161,7 +167,7 @@ class HashIndex(SupportsLookup, Index[_T]):
             val = self._load_val(val)
         for v in val:
             if v is None:
-                self.none_set.discard(obj_id)
+                self.__none_set.discard(obj_id)
             else:
                 dest_set = self.tree.get(v, None)
                 if dest_set is None:
@@ -177,7 +183,6 @@ class HashIndex(SupportsLookup, Index[_T]):
     ) -> None:
         obj_id = ido.id_from_obj(obj)
         old_val = self._load_val(old_val)
-        ret_vals = []
         if new_val is None:
             new_val = [*self._extract_val(obj, ctx, False)]
         else:
@@ -189,7 +194,7 @@ class HashIndex(SupportsLookup, Index[_T]):
 
         for v in removed_s:
             if v is None:
-                self.none_set.discard(obj_id)
+                self.__none_set.discard(obj_id)
                 continue
             dest_set = self.tree.get(v, None)
             if dest_set is None:
@@ -202,18 +207,30 @@ class HashIndex(SupportsLookup, Index[_T]):
 
         for v in added_s:
             if v is None:
-                self.none_set.add(obj_id)
+                self.__none_set.add(obj_id)
             else:
                 dest_set = self.tree.get(v, None)
+                if dest_set is not None and self.params.unique:
+                    raise ValueError(
+                        f'Unique constraint violation when refreshing object "{obj}": index "{self}" already has value "{v}"'
+                    )
                 dest_set2 = so.add(dest_set, obj_id)
                 if dest_set is not dest_set2:
                     self.tree[v] = dest_set2
 
         return self._store_val(new_val)
 
+    @property
+    def none_set(self) -> Int64Set:
+        if hasattr(self, '__none_set'):
+            return self.__none_set
+        else:
+            raise NameError(f'index {self} has no none_set')
+
     def clear(self) -> None:
         self.tree.clear()
-        self.none_set.clear()
+        if hasattr(self, '__none_set'):
+            self.__none_set.clear()
 
     def clone(self) -> T.Self:
         return type(self)(self.params)
@@ -223,7 +240,7 @@ class HashIndex(SupportsLookup, Index[_T]):
 
     def lookup(self, val: T.Any) -> Int64Set:
         if val is None:
-            obj_ids = self.none_set
+            obj_ids = self.__none_set
         else:
             obj_ids = so.iterate(self.tree.get(val, None))
         return Int64Set(obj_ids)
@@ -318,7 +335,7 @@ class InvertedIndex(HashIndex[_T]):
     This matches IN expressions, e.g. `1 in a`
     """
 
-    no_none_allowed = True
+    NONE_ALLOWED = False
 
     def _extract_val(
         self, obj: _T, ctx: 'Context[_T]', memory: bool
