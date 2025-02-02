@@ -437,6 +437,9 @@ class Wut(Context[_T], T.MutableSet):
         ids_sorted = self.sort_ids(ids, ordering)
         return [ido.obj_from_id(id) for id in ids_sorted]
 
+    def list_objects(self, ids: T.Iterable[int]) -> list[_T]:
+        return list(self.objects(ids))
+
     def _iter_indexes(self, *, memorized_only=False) -> T.Iterator[Index]:
         for indexes in self.indexes.values():
             for index in indexes:

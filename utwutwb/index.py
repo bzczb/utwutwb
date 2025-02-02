@@ -249,10 +249,10 @@ class HashIndex(SupportsLookup, Index[_T]):
 
     def lookup(self, val: T.Any) -> Int64Set:
         if val is None:
-            obj_ids = self.__none_set
+            return self.__none_set
         else:
-            obj_ids = so.iterate(self.tree.get(val, None))
-        return Int64Set(obj_ids)
+            eset = self.tree.get(val, None)
+            return so.to_set(eset)
 
     def match(self, condition: 'BinOp', operand: 'Condition') -> 'T.Optional[Plan]':
         if isinstance(condition, Eq) and isinstance(operand, Literal):
