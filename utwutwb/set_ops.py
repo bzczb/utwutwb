@@ -1,46 +1,56 @@
 import typing as T
-from array import array
 
-from cykhash import Int64Set
+from utwutwb.box import Box
+from utwutwb.constants import ARRAY_SIZE_MAX, SET_SIZE_MIN
 
-from utwutwb.constants import ARR_TYPE, ARRAY_SIZE_MAX, SET_SIZE_MIN
-
-EfficientSet: T.TypeAlias = T.Union[Int64Set, array, int, None]
+EfficientSet: T.TypeAlias = T.Union[set[Box], list[Box], Box, None]
 
 
-def create(a: T.Iterable[int]) -> EfficientSet:
-    ls = list(a)
-    if len(ls) == 0:
-        return None
-    elif len(ls) == 1:
-        return ls[0]
-    elif len(ls) <= ARRAY_SIZE_MAX:
-        return array(ARR_TYPE, ls)
-    else:
-        return Int64Set(ls)
-
-
-def to_set(a: EfficientSet) -> Int64Set:
+def create(a: T.Iterable[Box] | None = None) -> EfficientSet:
     if a is None:
-        return Int64Set()
-    elif type(a) == int:  # noqa
-        return Int64Set([a])
-    elif type(a) == array:  # noqa
-        return Int64Set(a)
+        return None
+    it = iter(a)
+    try:
+        first = next(it)
+    except StopIteration:
+        return None
+
+    try:
+        second = next(it)
+    except StopIteration:
+        return first
+
+    ls = [first, second]
+    for i in range(ARRAY_SIZE_MAX - 2):
+        try:
+            ls.append(next(it))
+        except StopIteration:
+            return ls
+
+    s = set(ls)
+    s.update(it)
+    return s
+
+
+def to_set(a: EfficientSet) -> set:
+    if a is None:
+        return set()
+    elif isinstance(a, Box):
+        return {a}
+    elif type(a) == list:  # noqa
+        return set(a)
     else:
-        assert type(a) == Int64Set  # noqa
+        assert type(a) == set  # noqa
         return a
 
 
-def from_set(a: Int64Set) -> EfficientSet:
+def from_set(a: set) -> EfficientSet:
     if len(a) == 0:
         return None
     elif len(a) == 1:
         return next(iter(a))
     elif len(a) <= ARRAY_SIZE_MAX:
-        arr = array(ARR_TYPE)
-        arr.extend(a)
-        return arr
+        return list(a)
     else:
         return a
 
@@ -50,17 +60,17 @@ def size(a: EfficientSet) -> int:
         return 0
     elif type(a) == int:  # noqa
         return 1
-    elif type(a) == array:  # noqa
+    elif type(a) == list:  # noqa
         return len(a)
     else:
-        assert type(a) == Int64Set  # noqa
+        assert type(a) == set  # noqa
         return len(a)
 
 
-def iterate(a: EfficientSet) -> T.Iterator[int]:
+def iterate(a: EfficientSet) -> T.Iterator[Box]:
     if a is None:
-        yield from ()
-    elif type(a) == int:  # noqa
+        return
+    elif isinstance(a, Box):
         yield a
     else:
         yield from a  # type: ignore
@@ -69,47 +79,47 @@ def iterate(a: EfficientSet) -> T.Iterator[int]:
 def copy(a: EfficientSet) -> EfficientSet:
     if a is None:
         return None
-    elif type(a) == int:  # noqa
+    elif isinstance(a, Box):
         return a
-    elif type(a) == array:  # noqa
+    elif type(a) == list:  # noqa
         return a[:]
     else:
-        assert type(a) == Int64Set  # noqa
+        assert type(a) == set  # noqa
         return a.copy()  # type: ignore
 
 
-def add(a: EfficientSet, val: int) -> EfficientSet:
+def add(a: EfficientSet, val: Box) -> EfficientSet:
     if a is None:
         # upgrade None -> int
         return val
-    elif type(a) == int:  # noqa
+    elif isinstance(a, Box):
         if a == val:
             return a
         # upgrade int -> array
-        return array(ARR_TYPE, [a, val])
-    elif type(a) == array:  # noqa
+        return [a, val]
+    elif type(a) == list:  # noqa
         if val in a:
             return a
         a.append(val)
         if len(a) > ARRAY_SIZE_MAX:
             # upgrade array -> set
-            return Int64Set(a)
+            return set(a)
         return a
     else:
-        assert type(a) == Int64Set  # noqa
+        assert type(a) == set  # noqa
         a.add(val)  # type: ignore
         return a
 
 
-def discard(a: EfficientSet, val: int) -> EfficientSet:
+def discard(a: EfficientSet, val: Box) -> EfficientSet:
     if a is None:
         return None
-    elif type(a) == int:  # noqa
+    elif isinstance(a, Box):
         if a == val:
             # downgrade int -> None
             return None
         return a
-    elif type(a) == array:  # noqa
+    elif type(a) == list:  # noqa
         if val not in a:
             return a
         a.remove(val)
@@ -119,17 +129,16 @@ def discard(a: EfficientSet, val: int) -> EfficientSet:
         else:
             return a
     else:
-        assert type(a) == Int64Set  # noqa
+        assert type(a) == set  # noqa
         a.discard(val)  # type: ignore
         if len(a) < SET_SIZE_MIN:
             # downgrade set -> array
-            b = array(ARR_TYPE)
-            b.extend(a)
+            b = list(a)
             return b
         return a
 
 
-def remove(a: EfficientSet, val: int) -> EfficientSet:
+def remove(a: EfficientSet, val: Box) -> EfficientSet:
     old_size = size(a)
     a = discard(a, val)
     if size(a) == old_size:
@@ -150,10 +159,10 @@ def update(a: EfficientSet, *b: EfficientSet) -> EfficientSet:
     for b_i in b:
         if b_i is None:
             continue
-        elif type(b_i) == int:  # noqa
+        elif isinstance(b_i, Box):
             a_temp.add(b_i)
         else:
-            a_temp.update(b_i)
+            a_temp.update(b_i)  # type: ignore
     return from_set(a_temp)
 
 
@@ -166,13 +175,13 @@ def intersection_update(a: EfficientSet, *b: EfficientSet) -> EfficientSet:
     for b_i in b:
         if b_i is None:
             return None
-        elif type(b_i) == int:  # noqa
+        elif isinstance(b_i, Box):
             if b_i not in a_temp:
                 return None
             a_temp.clear()
             a_temp.add(b_i)
         else:
-            a_temp.intersection_update(b_i)
+            a_temp.intersection_update(b_i)  # type: ignore
             if len(a_temp) == 0:
                 return None
     return from_set(a_temp)
@@ -187,10 +196,10 @@ def difference_update(a: EfficientSet, *b: EfficientSet) -> EfficientSet:
     for b_i in b:
         if b_i is None:
             continue
-        elif type(b_i) == int:  # noqa
+        elif isinstance(b_i, Box):
             a_temp.discard(b_i)
         else:
-            a_temp.difference_update(b_i)
+            a_temp.difference_update(b_i)  # type: ignore
     return from_set(a_temp)
 
 
@@ -203,11 +212,11 @@ def symmetric_difference_update(a: EfficientSet, b: EfficientSet) -> EfficientSe
     a_temp = to_set(a)
     if b is None:
         pass
-    elif type(b) == int:  # noqa
+    elif isinstance(b, Box):
         if b in a_temp:
             a_temp.discard(b)
         else:
             a_temp.add(b)
     else:
-        a_temp.symmetric_difference_update(b)
+        a_temp.symmetric_difference_update(b)  # type: ignore
     return from_set(a_temp)

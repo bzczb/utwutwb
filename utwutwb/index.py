@@ -5,7 +5,6 @@ import attr
 from BTrees.LOBTree import LOBTree
 from BTrees.OOBTree import OOBTree
 from BTrees.QOBTree import QOBTree
-from cykhash import Int64Set
 
 import utwutwb.set_ops as so
 from utwutwb.condition import Array, BinOp, Condition, Eq, Ge, Gt, In, Le, Literal, Lt
@@ -13,8 +12,8 @@ from utwutwb.constants import ARR_TYPE
 from utwutwb.plan import Bound, IndexLookup, IndexRange, Plan, Range, Union, Unset
 
 if T.TYPE_CHECKING:
+    from utwutwb.box import Box
     from utwutwb.context import Context
-    from utwutwb.store import ObjectStorage
 
 _OBJ = T.TypeVar('_OBJ')
 _PK = T.TypeVar('_PK')
@@ -54,7 +53,7 @@ class Index(T.Protocol[_PK, _OBJ]):
 
     def add(
         self,
-        obj: 'ObjectStorage[_PK, _OBJ]',
+        obj: 'Box[_PK, _OBJ]',
         ctx: 'Context[_PK, _OBJ]',
         val: T.Any = None,
     ) -> T.Any:
@@ -65,7 +64,7 @@ class Index(T.Protocol[_PK, _OBJ]):
 
     def remove(
         self,
-        obj: 'ObjectStorage[_PK, _OBJ]',
+        obj: 'Box[_PK, _OBJ]',
         ctx: 'Context[_PK, _OBJ]',
         val: T.Any = None,
     ) -> None:
@@ -73,7 +72,7 @@ class Index(T.Protocol[_PK, _OBJ]):
 
     def refresh(
         self,
-        obj: 'ObjectStorage[_PK, _OBJ]',
+        obj: 'Box[_PK, _OBJ]',
         ctx: 'Context[_PK, _OBJ]',
         old_val: T.Any,
         new_val: T.Any = None,
@@ -102,7 +101,7 @@ class Index(T.Protocol[_PK, _OBJ]):
 
     def make_val(
         self,
-        obj: 'ObjectStorage[_PK, _OBJ]',
+        obj: 'Box[_PK, _OBJ]',
         ctx: 'Context[_PK, _OBJ]',
     ) -> T.Any:
         """
@@ -116,7 +115,7 @@ class Index(T.Protocol[_PK, _OBJ]):
 
 @T.runtime_checkable
 class SupportsLookup(T.Protocol):
-    def lookup(self, value: T.Any) -> Int64Set:
+    def lookup(self, value: T.Any) -> so.EfficientSet:
         """
         Get members from the index.
 
@@ -129,7 +128,7 @@ class SupportsLookup(T.Protocol):
 
 @T.runtime_checkable
 class SupportsRange(T.Protocol):
-    def range(self, range: 'Range') -> Int64Set:
+    def range(self, range: 'Range') -> so.EfficientSet:
         """
         Get members from the index base on a range of values.
 
@@ -153,20 +152,20 @@ class HashIndex(SupportsLookup, Index[int, _OBJ]):
     """
 
     tree: T.Any  # really btree
-    __none_set: Int64Set
+    __none_set: so.EfficientSet
     NONE_ALLOWED: T.ClassVar[bool] = True
 
     def __init__(self, attr: str | IndexParams):
         self.params = attr if isinstance(attr, IndexParams) else IndexParams(attr)
         self.tree = self.params.make_btree()
         if self.NONE_ALLOWED and self.params.none_allowed:
-            self.__none_set = Int64Set()
+            self.__none_set = so.create()
         self.number = None
         self.mem_number = None
 
     def add(
         self,
-        obj: 'ObjectStorage[int, _OBJ]',
+        obj: 'Box[int, _OBJ]',
         ctx: 'Context[int, _OBJ]',
         val: T.Any = None,
     ) -> list:
@@ -177,14 +176,14 @@ class HashIndex(SupportsLookup, Index[int, _OBJ]):
             val = self._load_val(val)
         for v in val:
             if v is None:
-                self.__none_set.add(obj.pk)
+                self.__none_set = so.add(self.__none_set, obj)
             else:
                 dest_set = self.tree.get(v, None)
                 if dest_set is not None and self.params.unique:
                     raise ValueError(
                         f'Unique constraint violation when adding object "{obj}": index "{self}"  already has value "{v}"'
                     )
-                dest_set2 = so.add(dest_set, obj.pk)
+                dest_set2 = so.add(dest_set, obj)
                 if dest_set is not dest_set2:
                     self.tree[v] = dest_set2
             ret_vals.append(v)
@@ -192,7 +191,7 @@ class HashIndex(SupportsLookup, Index[int, _OBJ]):
 
     def remove(
         self,
-        obj: 'ObjectStorage[int, _OBJ]',
+        obj: 'Box[int, _OBJ]',
         ctx: 'Context[int, _OBJ]',
         val: T.Any = None,
     ) -> None:
@@ -202,12 +201,12 @@ class HashIndex(SupportsLookup, Index[int, _OBJ]):
             val = self._load_val(val)
         for v in val:
             if v is None:
-                self.__none_set.discard(obj.pk)
+                self.__none_set = so.discard(self.__none_set, obj)
             else:
                 dest_set = self.tree.get(v, None)
                 if dest_set is None:
                     continue
-                dest_set2 = so.discard(dest_set, obj.pk)
+                dest_set2 = so.discard(dest_set, obj)
                 if dest_set2 is None:
                     del self.tree[v]
                 elif dest_set is not dest_set2:
@@ -215,7 +214,7 @@ class HashIndex(SupportsLookup, Index[int, _OBJ]):
 
     def refresh(
         self,
-        obj: 'ObjectStorage[int, _OBJ]',
+        obj: 'Box[int, _OBJ]',
         ctx: 'Context[int, _OBJ]',
         old_val: T.Any,
         new_val: T.Any = None,
@@ -233,12 +232,12 @@ class HashIndex(SupportsLookup, Index[int, _OBJ]):
 
         for v in removed_s:
             if v is None:
-                self.__none_set.discard(obj.pk)
+                self.__none_set = so.discard(self.__none_set, obj)
                 continue
             dest_set = self.tree.get(v, None)
             if dest_set is None:
                 continue
-            dest_set2 = so.discard(dest_set, obj.pk)
+            dest_set2 = so.discard(dest_set, obj)
             if dest_set2 is None:
                 del self.tree[v]
             elif dest_set is not dest_set2:
@@ -246,21 +245,21 @@ class HashIndex(SupportsLookup, Index[int, _OBJ]):
 
         for v in added_s:
             if v is None:
-                self.__none_set.add(obj.pk)
+                self.__none_set = so.add(self.__none_set, obj)
             else:
                 dest_set = self.tree.get(v, None)
                 if dest_set is not None and self.params.unique:
                     raise ValueError(
                         f'Unique constraint violation when refreshing object "{obj}": index "{self}" already has value "{v}"'
                     )
-                dest_set2 = so.add(dest_set, obj.pk)
+                dest_set2 = so.add(dest_set, obj)
                 if dest_set is not dest_set2:
                     self.tree[v] = dest_set2
 
         return self._store_val(new_val)
 
     @property
-    def none_set(self) -> Int64Set:
+    def none_set(self) -> so.EfficientSet:
         if hasattr(self, '__none_set'):
             return self.__none_set
         else:
@@ -269,7 +268,7 @@ class HashIndex(SupportsLookup, Index[int, _OBJ]):
     def clear(self) -> None:
         self.tree.clear()
         if hasattr(self, '__none_set'):
-            self.__none_set.clear()
+            self.__none_set = so.clear(self.__none_set)
 
     def clone(self) -> T.Self:
         return type(self)(self.params)
@@ -277,12 +276,11 @@ class HashIndex(SupportsLookup, Index[int, _OBJ]):
     def make_val(self, obj: T.Any, ctx) -> None:
         return self._store_val(list(self._extract_val(obj, ctx, False)))
 
-    def lookup(self, val: T.Any) -> Int64Set:
+    def lookup(self, val: T.Any) -> so.EfficientSet:
         if val is None:
             return self.__none_set
         else:
-            eset = self.tree.get(val, None)
-            return so.to_set(eset)
+            return self.tree.get(val, None)
 
     def match(self, condition: 'BinOp', operand: 'Condition') -> 'T.Optional[Plan]':
         if isinstance(condition, Eq) and isinstance(operand, Literal):
@@ -303,7 +301,7 @@ class HashIndex(SupportsLookup, Index[int, _OBJ]):
 
     def _extract_val(
         self,
-        obj: 'ObjectStorage[int, _OBJ]',
+        obj: 'Box[int, _OBJ]',
         ctx: 'Context[int, _OBJ]',
         memory: bool,
     ) -> T.Iterable[T.Any]:
@@ -335,7 +333,7 @@ class RangeIndex(SupportsRange, HashIndex[_OBJ]):
         Ge: lambda val: Range(left=Bound(val, True)),
     }
 
-    def range(self, range: Range[T.Any]) -> Int64Set:
+    def range(self, range: Range[T.Any]) -> so.EfficientSet:
         if type(range.left) == Unset:  # noqa
             left = None
             excludemin = False
@@ -354,10 +352,7 @@ class RangeIndex(SupportsRange, HashIndex[_OBJ]):
         vals = self.tree.values(
             left, right, excludemin=excludemin, excludemax=excludemax
         )
-        result_set = Int64Set()
-        for val in vals:
-            result_set.update(so.iterate(val))
-        return result_set
+        return so.union(*vals)
 
     def match(self, condition: BinOp, operand: Condition) -> T.Optional[Plan]:
         if isinstance(condition, self.COMPARISONS) and isinstance(operand, Literal):
@@ -381,7 +376,7 @@ class InvertedIndex(HashIndex[_OBJ]):
 
     def _extract_val(
         self,
-        obj: 'ObjectStorage[int, _OBJ]',
+        obj: 'Box[int, _OBJ]',
         ctx: 'Context[int, _OBJ]',
         memory: bool,
     ) -> T.Iterable[T.Any]:

@@ -16,5 +16,20 @@
                 "PYTHONPATH": "${workspaceFolder}${pathSeparator}${env:PYTHONPATH}"
             }
         },
+        {
+            "name": "pytest",
+            "purpose": [
+                "debug-test",
+                "debug-in-terminal"
+            ],
+            "presentation": {
+                "hidden": true
+            },
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${file}",
+            "console": "internalConsole",
+            "justMyCode": false
+        }
     ]
 }

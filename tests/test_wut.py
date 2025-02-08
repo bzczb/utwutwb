@@ -45,7 +45,7 @@ class TestWut(TestCase):
                     plan = iset.plan(test['condition'])
                     optimized_plan = iset.optimize(deepcopy(plan))
                     result_ids = iset.execute(deepcopy(optimized_plan))
-                    result = set(iset.sorted_objects(result_ids))
+                    result = set(iset.list_objects(result_ids))
 
                     if OVERWRITE:
                         test['plan'] = str(plan)
@@ -82,7 +82,7 @@ class TestWut(TestCase):
         self.assertEqual(
             {objs[0], objs[1]},
             set(
-                iset.sorted_objects(
+                iset.list_objects(
                     iset.filter(
                         or_(
                             attr('x').eq(1).and_(attr('y').in_([1, 2])),
@@ -94,5 +94,5 @@ class TestWut(TestCase):
         )
         self.assertEqual(
             {objs[0], objs[1]},
-            set(iset.sorted_objects(iset.filter(attr('x').eq(3).not_()))),
+            set(iset.list_objects(iset.filter(attr('x').eq(3).not_()))),
         )

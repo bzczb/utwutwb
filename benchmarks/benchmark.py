@@ -44,7 +44,10 @@ def lookup(objs):
         [(i, x.a, x.b) for i, x in enumerate(objs)],
     )
 
-    a_and_b = True  # true -> SQLite becomes the worst by quite a bit
+    a_and_b = True
+    # true -> SQLite gets a big constant factor delay
+    # Either way, set comprehension has a big constant factor delay
+
     if a_and_b:
         q = 'a = 0 AND b = 59'
         ducks_q = {'a': 0, 'b': 59}
@@ -62,14 +65,15 @@ def lookup(objs):
         'utwutwb IndexedSet (pre-planned)': measure(
             lambda: iset.list_objects(iset.execute(plan))
         ),
+        'utwutwb IndexedSet (no list)': measure(lambda: iset.execute(plan)),
         'ducks Dex': measure(lambda: set(dex[ducks_q])),
         'ducks FrozenDex': measure(lambda: set(fdex[ducks_q])),
-        'sqlite': measure(
-            lambda: {
-                objs[i]
-                for (i,) in db.execute(f'SELECT id FROM objs WHERE {q}').fetchall()
-            }
-        ),
+        # 'sqlite': measure(
+        #     lambda: {
+        #         objs[i]
+        #         for (i,) in db.execute(f'SELECT id FROM objs WHERE {q}').fetchall()
+        #     }
+        # ),
         # "set comprehension": measure(lambda: {x for x in objs if x.a == 0 and x.b == 59}),
     }
 
@@ -125,6 +129,7 @@ def range_lookup(objs, start, stop):
         'utwutwb IndexedSet (pre-planned)': measure(
             lambda: iset.list_objects(iset.execute(plan))
         ),
+        'utwutwb IndexedSet (no list)': measure(lambda: iset.execute(plan)),
         'ducks Dex': measure(lambda: set(dex[ducks_q])),
         'ducks FrozenDex': measure(lambda: set(fdex[ducks_q])),
         'sqlite': measure(
